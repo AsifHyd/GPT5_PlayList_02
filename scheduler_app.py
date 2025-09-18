@@ -20,11 +20,16 @@ except Exception:
 import obsws_python as obs
 
 
+def seconds_since_midnight() -> int:
+    now = datetime.now()
+    return now.hour * 3600 + now.minute * 60 + now.second
+
+
 class PlaylistScheduler:
     def __init__(self, root):
         self.root = root
-        self.root.title("OBS Playlist Scheduler v1.4 - Live Broadcast Automation")
-        self.root.geometry("1480x880")
+        self.root.title("OBS Playlist Scheduler v1.5 - Live Broadcast Automation")
+        self.root.geometry("1480x900")
 
         # Data
         self.videos = []
@@ -34,16 +39,19 @@ class PlaylistScheduler:
         self.broadcast_thread = None
         self.obs_client = None
         self.current_video_index = -1
-        self.broadcast_start_time = None
-        self.manual_time_offset = 0
         self.fillers_active = False
+
+        # Absolute schedule (seconds since midnight) for each item
+        self.abs_starts = []
+        self.abs_ends = []
+        self.total_duration = 0
 
         # OBS connection fields (defaults for OBS 28+/31.x)
         self.obs_host_var = tk.StringVar(value="127.0.0.1")
         self.obs_port_var = tk.StringVar(value="4455")
         self.obs_password_var = tk.StringVar(value="")
 
-        # Map scene -> input name (for media control)
+        # Scene -> input name map
         self.scene_to_input = {}
 
         # Theme colors
@@ -64,6 +72,19 @@ class PlaylistScheduler:
         allowed = "-_.() []{}abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         cleaned = "".join(ch if ch in allowed else "_" for ch in name)
         return cleaned[:max_len]
+
+    def recompute_schedule_times(self):
+        """Compute absolute start/end for each video from Start Time field (seconds since midnight)."""
+        start_seconds = self.time_to_seconds(self.start_time_var.get())
+        self.abs_starts = []
+        self.abs_ends = []
+        t = start_seconds
+        for v in self.videos:
+            self.abs_starts.append(t)
+            t2 = t + int(v['duration'])
+            self.abs_ends.append(t2)
+            t = t2
+        self.total_duration = (t - start_seconds)
 
     # ---------- UI / Theme ----------
     def apply_dark_theme(self):
@@ -88,7 +109,9 @@ class PlaylistScheduler:
             style.configure("Treeview",
                             background=self.acc,
                             fieldbackground=self.acc,
-                            foreground=self.fg)
+                            foreground=self.fg,
+                            rowheight=26)
+            style.configure("Treeview.Heading", background=self.acc, foreground=self.fg)
             style.map("Treeview",
                       background=[("selected", self.sel)],
                       foreground=[("selected", self.fg)])
@@ -105,7 +128,7 @@ class PlaylistScheduler:
         main_frame.columnconfigure(1, weight=1)
         main_frame.rowconfigure(1, weight=1)
 
-        # Left panel with vertical scroll (so buttons never get hidden)
+        # Left panel with vertical scroll
         left_container = ttk.Frame(main_frame)
         left_container.grid(row=0, column=0, rowspan=2, sticky=(tk.N, tk.S))
         self.left_canvas = tk.Canvas(left_container, width=360, highlightthickness=0, bg=self.bg)
@@ -198,7 +221,7 @@ class PlaylistScheduler:
 
         ttk.Separator(left_panel, orient='horizontal').grid(row=27, column=0, sticky=(tk.W, tk.E), pady=5)
 
-        # Fillers management (clearly visible)
+        # Fillers management
         ttk.Label(left_panel, text="🧩 Fillers (loop when idle)", font=('Arial', 9, 'bold')).grid(row=28, column=0, sticky=tk.W)
         ttk.Button(left_panel, text="➕ Add Fillers", command=self.add_fillers).grid(row=29, column=0, pady=1, sticky=(tk.W, tk.E))
         ttk.Button(left_panel, text="🧹 Clear Fillers", command=self.clear_fillers).grid(row=30, column=0, pady=1, sticky=(tk.W, tk.E))
@@ -279,9 +302,10 @@ class PlaylistScheduler:
             return 0
 
     def format_duration(self, seconds):
-        h = int(seconds // 3600)
-        m = int((seconds % 3600) // 60)
-        s = int(seconds % 60)
+        seconds = int(seconds)
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        s = seconds % 60
         return f"{h:02d}:{m:02d}:{s:02d}"
 
     # ---------- DnD ----------
@@ -299,10 +323,11 @@ class PlaylistScheduler:
     def update_ui_loop(self):
         # Global elapsed (telecast)
         if self.broadcasting:
-            current_time = time.time()
-            if self.broadcast_start_time:
-                elapsed = (current_time - self.broadcast_start_time) + self.manual_time_offset
-                self.time_label.configure(text=f"Elapsed: {self.format_duration(elapsed)}")
+            # show time since schedule start based on wall-clock
+            now_sod = seconds_since_midnight()
+            sched_start = self.abs_starts[0] if self.abs_starts else 0
+            tele_elapsed = max(0, now_sod - sched_start)
+            self.time_label.configure(text=f"Elapsed: {self.format_duration(tele_elapsed)}")
         else:
             self.time_label.configure(text="")
 
@@ -310,24 +335,26 @@ class PlaylistScheduler:
         try:
             if self.obs_client:
                 input_name = None
-                scene_name = None
                 if 0 <= self.current_video_index < len(self.videos):
                     base = os.path.splitext(self.videos[self.current_video_index]['filename'])[0]
                     scene_name = f"Video_{self.current_video_index+1:03d}_{self._sanitize_name(base, 32)}"
                     input_name = self.scene_to_input.get(scene_name)
                 elif self.fillers_active:
-                    scene_name = "Fillers_Scene"
-                    input_name = self.scene_to_input.get(scene_name)
+                    input_name = self.scene_to_input.get("Fillers_Scene")
 
                 if input_name:
-                    st = self.obs_client.get_media_input_status(input_name)
+                    st = self.obs_client.get_media_input_status(input_name)  # mediaState, mediaCursor, mediaDuration (ms)
                     data = getattr(st, "responseData", None) or {}
                     cursor = int(data.get("mediaCursor", 0))
                     dur = int(data.get("mediaDuration", 0))
                     state = data.get("mediaState", "")
-                    # Values are in ms in v5; convert to seconds for display math
-                    played_s = cursor / 1000 if dur >= 1000 else cursor
-                    total_s = max(dur / 1000 if dur >= 1000 else dur, 0.001)
+                    # Convert ms -> s where appropriate
+                    if dur >= 1000:
+                        played_s = cursor / 1000
+                        total_s = dur / 1000
+                    else:
+                        played_s = cursor
+                        total_s = dur
                     remaining_s = max(total_s - played_s, 0)
                     self.file_time_label.configure(
                         text=f"File: {self.format_duration(played_s)} / {self.format_duration(total_s)}  (−{self.format_duration(remaining_s)}) [{state}]"
@@ -335,7 +362,6 @@ class PlaylistScheduler:
                 else:
                     self.file_time_label.configure(text="Fillers are playing" if self.fillers_active else "Nothing is playing")
         except Exception:
-            # Non-fatal UI update error
             pass
 
         self.root.after(1000, self.update_ui_loop)
@@ -357,7 +383,7 @@ class PlaylistScheduler:
                 port = 4455
             password = self.obs_password_var.get()
 
-            self.obs_client = obs.ReqClient(host=host, port=port, password=password, timeout=3)
+            self.obs_client = obs.ReqClient(host=host, port=port, password=password, timeout=4)
             version_info = self.obs_client.get_version()
 
             self.connection_status.configure(text="● Connected", foreground=self.ok)
@@ -451,7 +477,6 @@ class PlaylistScheduler:
                     print(f"Failed to create {scene_name}: {e}")
                     failed_count += 1
 
-            # Prepare Fillers_Scene if fillers exist
             if self.fillers:
                 self.ensure_fillers_scene()
 
@@ -461,7 +486,6 @@ class PlaylistScheduler:
                 msg = f"🎉 SUCCESS!\n\n✅ {success_count} scenes created with sources!"
                 if failed_count > 0:
                     msg += f"\n❌ {failed_count} scenes failed"
-                msg += f"\n\n📺 Check OBS - sources should now appear!"
                 messagebox.showinfo("Setup Complete", msg)
                 self.status_var.set(f"Scenes: {success_count} working, {failed_count} failed")
             else:
@@ -483,7 +507,6 @@ class PlaylistScheduler:
                 if isinstance(s, dict) and "sceneName" in s:
                     scenes.append(s["sceneName"])
 
-            # Determine which to delete
             to_delete = []
             for name in scenes:
                 if name == "Fillers_Scene":
@@ -493,7 +516,6 @@ class PlaylistScheduler:
                     if len(parts) >= 2 and len(parts[1]) == 3 and parts[1].isdigit():
                         to_delete.append(name)
 
-            # Safe scene to switch to
             safe_scene = None
             for name in scenes:
                 if name not in to_delete:
@@ -503,9 +525,8 @@ class PlaylistScheduler:
             if not to_delete:
                 messagebox.showinfo("Remove Scenes", "No app-created scenes found.")
                 return
-
             if not safe_scene:
-                messagebox.showwarning("Remove Scenes", "No safe scene to switch to before deletion; please create one manually.")
+                messagebox.showwarning("Remove Scenes", "No safe scene to switch to before deletion; create one manually.")
                 return
 
             if messagebox.askyesno("Confirm", f"Remove {len(to_delete)} scenes created by the app?"):
@@ -517,7 +538,7 @@ class PlaylistScheduler:
                 removed = 0
                 for name in to_delete:
                     try:
-                        self.obs_client.remove_scene(name)
+                        self.obs_client.remove_scene(name)  # obsws-python v5 method
                         removed += 1
                     except Exception as e:
                         print(f"Remove failed for {name}: {e}")
@@ -543,14 +564,12 @@ class PlaylistScheduler:
         self.status_var.set("Fillers cleared")
 
     def ensure_fillers_scene(self):
-        """Create/refresh Fillers_Scene using VLC playlist if possible, else first file loop."""
+        """Create/refresh Fillers_Scene using VLC playlist if possible, else single loop."""
         try:
             try:
                 self.obs_client.create_scene("Fillers_Scene")
             except Exception:
                 pass
-
-            # Remove previous playlist/input if exists
             try:
                 self.obs_client.remove_input("Fillers_Playlist")
             except Exception:
@@ -559,19 +578,8 @@ class PlaylistScheduler:
             if len(self.fillers) > 1:
                 playlist = [{"value": os.path.abspath(p).replace("\\", "/"), "hidden": False, "selected": True}
                             for p in self.fillers]
-                input_settings = {
-                    "playlist": playlist,
-                    "loop": True,
-                    "shuffle": False,
-                    "playback_behavior": "always_play"
-                }
-                self.obs_client.create_input(
-                    "Fillers_Scene",
-                    "Fillers_Playlist",
-                    "vlc_source",
-                    input_settings,
-                    True
-                )
+                input_settings = {"playlist": playlist, "loop": True, "shuffle": False, "playback_behavior": "always_play"}
+                self.obs_client.create_input("Fillers_Scene", "Fillers_Playlist", "vlc_source", input_settings, True)
             else:
                 file_path = os.path.abspath(self.fillers[0]).replace("\\", "/")
                 input_settings = {
@@ -583,13 +591,7 @@ class PlaylistScheduler:
                     "close_when_inactive": False,
                     "hardware_decode": False
                 }
-                self.obs_client.create_input(
-                    "Fillers_Scene",
-                    "Fillers_Playlist",
-                    "ffmpeg_source",
-                    input_settings,
-                    True
-                )
+                self.obs_client.create_input("Fillers_Scene", "Fillers_Playlist", "ffmpeg_source", input_settings, True)
 
             self.scene_to_input["Fillers_Scene"] = "Fillers_Playlist"
             self.status_var.set("Fillers_Scene ready")
@@ -602,15 +604,14 @@ class PlaylistScheduler:
         if not self.fillers:
             self.fillers_active = False
             self.live_status_label.configure(text="Nothing is playing", foreground=self.fg)
+            self.file_time_label.configure(text="Nothing is playing")
             return
         self.ensure_fillers_scene()
         try:
             self.obs_client.set_current_program_scene("Fillers_Scene")
             inp = self.scene_to_input.get("Fillers_Scene")
             if inp:
-                self.obs_client.trigger_media_input_action(
-                    inp, "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART"
-                )
+                self.obs_client.trigger_media_input_action(inp, "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART")
             self.fillers_active = True
             self.live_status_label.configure(text="Fillers are playing", foreground=self.warn)
             self.file_time_label.configure(text="Fillers are playing")
@@ -622,6 +623,8 @@ class PlaylistScheduler:
         if not self.obs_client:
             messagebox.showwarning("Broadcast Error", "Connect to OBS first.")
             return
+
+        self.recompute_schedule_times()
         if not self.videos:
             self.broadcasting = False
             self.play_fillers_if_needed()
@@ -629,36 +632,36 @@ class PlaylistScheduler:
 
         self.broadcasting = True
         self.fillers_active = False
-        self.broadcast_start_time = time.time()
-        start_seconds = self.time_to_seconds(self.start_time_var.get())
-        self.manual_time_offset = start_seconds
         self.current_video_index = -1
 
         self.broadcast_thread = threading.Thread(target=self.broadcast_controller, daemon=True)
         self.broadcast_thread.start()
 
-        # UI
         self.start_btn.configure(state='disabled')
         self.stop_btn.configure(state='normal')
         self.skip_btn.configure(state='normal')
         self.remove_btn.configure(state='disabled')
 
-        # Immediately start first video (no manual Skip required)
+        # Immediately play whichever item is active by wall‑clock
         try:
-            self.switch_to_video(0)
-            self.current_video_index = 0
+            now_sod = seconds_since_midnight()
+            idx = self.index_for_time(now_sod)
+            if idx is not None:
+                self.switch_to_video(idx)
+                self.current_video_index = idx
+            else:
+                self.play_fillers_if_needed()
         except Exception as e:
             print(f"Immediate start error: {e}")
 
         self.live_status_label.configure(text="🔴 BROADCASTING LIVE", foreground=self.err)
-        self.status_var.set(f"🔴 Live broadcast started from {self.start_time_var.get()}")
+        self.status_var.set("🔴 Live broadcast active")
 
     def stop_broadcast(self):
         self.broadcasting = False
         if self.broadcast_thread:
             self.broadcast_thread.join(timeout=1)
 
-        # After stopping, if fillers exist, switch to fillers
         self.play_fillers_if_needed()
 
         self.start_btn.configure(state='normal')
@@ -670,20 +673,40 @@ class PlaylistScheduler:
         self.update_timeline()
         self.status_var.set("Broadcast stopped")
 
+    def index_for_time(self, now_sod: int):
+        if not self.videos:
+            return None
+        # If before schedule start or after schedule end, return None
+        if now_sod < self.abs_starts[0] or now_sod >= self.abs_ends[-1]:
+            return None
+        # Find active segment
+        for i, (s, e) in enumerate(zip(self.abs_starts, self.abs_ends)):
+            if s <= now_sod < e:
+                return i
+        return None
+
     def broadcast_controller(self):
         while self.broadcasting:
             try:
-                current_time = time.time()
-                elapsed = (current_time - self.broadcast_start_time) + self.manual_time_offset
+                now_sod = seconds_since_midnight()
+                target_idx = self.index_for_time(now_sod)
 
-                # Time-based target index
-                target_index_time = self.get_video_at_time(elapsed)
+                # If the schedule says a clip should be on-air, ensure we are there
+                if target_idx is not None and target_idx != self.current_video_index:
+                    self.switch_to_video(target_idx)
+                    self.current_video_index = target_idx
 
-                # Media-based advance: if current media ended, move to next
-                target_index_media = -1
-                if 0 <= self.current_video_index < len(self.videos):
-                    base = os.path.splitext(self.videos[self.current_video_index]['filename'])[0]
-                    scene_name = f"Video_{self.current_video_index+1:03d}_{self._sanitize_name(base, 32)}"
+                # If schedule idle (before first or after last), go to fillers
+                if target_idx is None:
+                    if not self.fillers_active:
+                        self.play_fillers_if_needed()
+                else:
+                    self.fillers_active = False
+
+                # Additional media-ended guard: if current ended early, hop to next
+                if target_idx is not None:
+                    base = os.path.splitext(self.videos[target_idx]['filename'])[0]
+                    scene_name = f"Video_{target_idx+1:03d}_{self._sanitize_name(base, 32)}"
                     input_name = self.scene_to_input.get(scene_name)
                     if input_name:
                         try:
@@ -693,36 +716,18 @@ class PlaylistScheduler:
                             cursor = int(data.get("mediaCursor", 0))
                             dur = int(data.get("mediaDuration", 0))
                             if state == "OBS_MEDIA_STATE_ENDED" or (dur and cursor >= dur):
-                                target_index_media = self.current_video_index + 1
+                                # switch immediately to next by wall-clock (if within schedule)
+                                next_idx = target_idx + 1 if (target_idx + 1) < len(self.videos) else None
+                                if next_idx is not None and now_sod < self.abs_ends[-1]:
+                                    self.switch_to_video(next_idx)
+                                    self.current_video_index = next_idx
                         except Exception:
                             pass
-
-                # Decide the next index
-                target_index = max(target_index_time, target_index_media)
-
-                if target_index != self.current_video_index and 0 <= target_index < len(self.videos):
-                    self.switch_to_video(target_index)
-                    self.current_video_index = target_index
-
-                # Reached end of schedule
-                if target_index >= len(self.videos):
-                    self.broadcasting = False
-                    self.play_fillers_if_needed()
-                    break
 
                 time.sleep(0.5)
             except Exception as e:
                 print(f"Broadcast controller error: {e}")
                 time.sleep(1)
-
-    def get_video_at_time(self, elapsed_seconds):
-        current_time = 0
-        for i, video in enumerate(self.videos):
-            video_end = current_time + video['duration']
-            if current_time <= elapsed_seconds < video_end:
-                return i
-            current_time = video_end
-        return len(self.videos)  # if elapsed beyond end, indicate finished
 
     def switch_to_video(self, video_index):
         """Switch Program scene and explicitly restart its media input."""
@@ -739,7 +744,6 @@ class PlaylistScheduler:
                     )
                 filename = self.videos[video_index]['filename']
                 self.live_status_label.configure(text=f"🔴 NOW: {filename}", foreground=self.err)
-                self.fillers_active = False
                 # Update marker
                 for child in self.tree.get_children():
                     self.tree.set(child, 'status', '')
@@ -752,15 +756,10 @@ class PlaylistScheduler:
     def skip_to_next(self):
         if not self.broadcasting:
             return
-        next_index = self.current_video_index + 1
-        if next_index < len(self.videos):
-            self.switch_to_video(next_index)
-            self.current_video_index = next_index
-            # Adjust telecast offset so elapsed math keeps alignment
-            target_time = sum(video['duration'] for video in self.videos[:next_index])
-            now = time.time()
-            elapsed = (now - self.broadcast_start_time) + self.manual_time_offset
-            self.manual_time_offset += (target_time - elapsed)
+        next_idx = (self.current_video_index + 1) if self.current_video_index >= 0 else 0
+        if next_idx < len(self.videos):
+            self.switch_to_video(next_idx)
+            self.current_video_index = next_idx
         else:
             self.stop_broadcast()
 
@@ -771,10 +770,8 @@ class PlaylistScheduler:
         if not self.broadcasting:
             self.start_broadcast()
         index = self.tree.index(selection[0])
-        target_time = sum(video['duration'] for video in self.videos[:index])
-        now = time.time()
-        elapsed = (now - self.broadcast_start_time) + self.manual_time_offset
-        self.manual_time_offset += (target_time - elapsed)
+        self.switch_to_video(index)
+        self.current_video_index = index
 
     # ---------- Editing helpers ----------
     def get_selected_indices(self):
@@ -842,26 +839,24 @@ class PlaylistScheduler:
         if not filepath:
             return
 
-        start_seconds = self.time_to_seconds(self.start_time_var.get())
+        self.recompute_schedule_times()
         schedule = {
             "videos": [],
             "start_time": self.start_time_var.get(),
-            "total_duration": sum(v['duration'] for v in self.videos)
+            "total_duration": self.total_duration
         }
 
-        current_time = start_seconds
         for i, video in enumerate(self.videos):
             schedule["videos"].append({
                 "index": i,
                 "filename": video["filename"],
                 "filepath": os.path.abspath(video["filepath"]),
                 "duration": float(video["duration"]),
-                "start_time": int(current_time),
-                "start_formatted": self.format_duration(current_time),
-                "end_formatted": self.format_duration(current_time + video["duration"]),
+                "start_time_abs": int(self.abs_starts[i]),
+                "start_formatted": self.format_duration(self.abs_starts[i]),
+                "end_formatted": self.format_duration(self.abs_ends[i]),
                 "scene_name": f"Video_{i+1:03d}_{self._sanitize_name(os.path.splitext(video['filename'])[0], 32)}"
             })
-            current_time += video["duration"]
 
         try:
             with open(filepath, "w", encoding="utf-8") as f:
@@ -871,12 +866,12 @@ class PlaylistScheduler:
             messagebox.showerror("Export Error", f"Could not write file:\n{e}")
 
     # ---------- File/time UI ----------
-    def update_current_video_indicator(self, elapsed_seconds):
-        current_index = self.get_video_at_time(elapsed_seconds) if self.broadcasting else -1
+    def update_current_video_indicator(self, now_sod):
+        idx = self.index_for_time(now_sod) if self.broadcasting else None
         for child in self.tree.get_children():
             self.tree.set(child, 'status', '')
-        if 0 <= current_index < len(self.tree.get_children()):
-            current_item = self.tree.get_children()[current_index]
+        if idx is not None and 0 <= idx < len(self.tree.get_children()):
+            current_item = self.tree.get_children()[idx]
             self.tree.set(current_item, 'status', '▶')
 
     # ---------- Video IO ----------
@@ -931,27 +926,24 @@ class PlaylistScheduler:
         else:
             self.videos.extend(new_videos)
 
-        self.update_timeline()  # updates total duration immediately
+        self.update_timeline()  # recompute schedule + totals
 
     # ---------- Timeline ----------
     def update_timeline(self):
+        self.recompute_schedule_times()
+
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        start_seconds = self.time_to_seconds(self.start_time_var.get())
-        current_time = start_seconds
-
         for i, video in enumerate(self.videos):
-            start_time = self.format_duration(current_time)
-            end_time = self.format_duration(current_time + video['duration'])
+            start_time = self.format_duration(self.abs_starts[i])
+            end_time = self.format_duration(self.abs_ends[i])
             duration_str = self.format_duration(video['duration'])
             status = '▶' if i == self.current_video_index else ''
             self.tree.insert('', 'end', values=(status, video['filename'], duration_str, start_time, end_time))
-            current_time += video['duration']
 
-        total_duration = current_time - start_seconds
-        total_str = self.format_duration(total_duration)
-        end_time_str = self.format_duration(current_time)
+        total_str = self.format_duration(self.total_duration)
+        end_time_str = self.format_duration(self.abs_ends[-1]) if self.abs_ends else "00:00:00"
         self.status_var.set(f"Schedule: {self.start_time_var.get()} to {end_time_str} | Duration: {total_str} ({len(self.videos)} videos)")
 
     # ---------- Misc ----------
@@ -983,11 +975,8 @@ class PlaylistScheduler:
 
 
 def main():
-    try:
-        root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
-    except Exception:
-        root = tk.Tk()
-
+    # Ensure a single Tk root to avoid stray blank windows
+    root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
     app = PlaylistScheduler(root)
     root.update_idletasks()
     x = (root.winfo_screenwidth() // 2) - (root.winfo_width() // 2)
