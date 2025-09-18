@@ -40,9 +40,19 @@ class PlaylistScheduler:
         self.obs_port_var = tk.StringVar(value="4455")
         self.obs_password_var = tk.StringVar(value="")
 
+        # Map scene -> input name (used to trigger media play/restart)
+        self.scene_to_input = {}
+
         self.setup_ui()
         self.setup_drag_drop()
 
+    # ---------- Utilities ----------
+    def _sanitize_name(self, name: str, max_len: int = 64) -> str:
+        allowed = "-_.() []{}abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        cleaned = "".join(ch if ch in allowed else "_" for ch in name)
+        return cleaned[:max_len]
+
+    # ---------- UI ----------
     def setup_ui(self):
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
@@ -236,6 +246,7 @@ class PlaylistScheduler:
             self.time_label.configure(text="")
         self.root.after(1000, self.update_ui_loop)
 
+    # ---------- OBS ----------
     def connect_obs(self):
         """Connect to OBS WebSocket v5 server (default 127.0.0.1:4455)."""
         try:
@@ -290,30 +301,38 @@ class PlaylistScheduler:
         self.status_var.set("Disconnected from OBS")
 
     def setup_obs_scenes(self):
-        """Create scenes and attach media sources correctly (v5 CreateInput)."""
+        """Create scenes and attach media sources; input names match file names."""
         if not self.obs_client or not self.videos:
             messagebox.showwarning("Setup Error", "Connect to OBS and add videos first.")
             return
 
         try:
+            self.scene_to_input.clear()
             success_count = 0
             failed_count = 0
 
             for i, video in enumerate(self.videos):
-                scene_name = f"Video_{i+1:03d}_{os.path.splitext(video['filename'])[0][:15]}"
-                source_name = f"Media_{i+1:03d}"
+                base = os.path.splitext(video['filename'])[0]
+                safe_base = self._sanitize_name(base)
+                # Scene name stays numbered for schedule order
+                scene_name = f"Video_{i+1:03d}_{self._sanitize_name(base, 32)}"
 
-                # Create scene (idempotent)
+                # Input name mirrors the actual file name (unique if duplicates)
+                input_name = safe_base
+                existing = set(self.scene_to_input.values())
+                suffix = 1
+                while input_name in existing:
+                    suffix += 1
+                    input_name = f"{safe_base}_{suffix}"
+
                 try:
                     self.obs_client.create_scene(scene_name)
-                    print(f"✅ Created scene: {scene_name}")
+                    print(f"✅ Scene ready: {scene_name}")
                 except Exception as ce:
                     print(f"Scene {scene_name} might exist: {ce}")
 
                 try:
-                    # Normalize Windows path for OBS
                     file_path = os.path.abspath(video['filepath']).replace("\\", "/")
-
                     input_settings = {
                         "local_file": file_path,
                         "is_local_file": True,
@@ -324,15 +343,16 @@ class PlaylistScheduler:
                         "hardware_decode": False
                     }
 
-                    # v5: Create input and attach to the scene in one call (positional signature)
+                    # Create input in the target scene and enable the scene item
                     self.obs_client.create_input(
-                        scene_name,              # sceneName
-                        source_name,             # inputName
-                        "ffmpeg_source",         # inputKind
-                        input_settings,          # inputSettings
-                        True                     # sceneItemEnabled
+                        scene_name,
+                        input_name,
+                        "ffmpeg_source",
+                        input_settings,
+                        True
                     )
-                    print(f"✅ Created and attached input: {source_name} -> {scene_name}")
+                    self.scene_to_input[scene_name] = input_name
+                    print(f"✅ {scene_name} <- {input_name} ({file_path})")
                     success_count += 1
 
                 except Exception as e:
@@ -444,13 +464,25 @@ class PlaylistScheduler:
         return -1
 
     def switch_to_video(self, video_index):
+        """Switch Program scene and explicitly restart its media input."""
         try:
             if 0 <= video_index < len(self.videos):
-                scene_name = f"Video_{video_index+1:03d}_{os.path.splitext(self.videos[video_index]['filename'])[0][:15]}"
+                base = os.path.splitext(self.videos[video_index]['filename'])[0]
+                scene_name = f"Video_{video_index+1:03d}_{self._sanitize_name(base, 32)}"
+
+                # Switch Program scene
                 self.obs_client.set_current_program_scene(scene_name)
-                print(f"✅ Switched to: {scene_name}")
+
+                # Restart media to ensure playback in Program (reliable in Studio Mode)
+                input_name = self.scene_to_input.get(scene_name)
+                if input_name:
+                    self.obs_client.trigger_media_input_action(
+                        input_name,
+                        "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART"
+                    )
+                print(f"✅ Switched to: {scene_name} and restarted: {input_name}")
         except Exception as e:
-            print(f"❌ Error switching scene: {e}")
+            print(f"❌ Error switching/starting media: {e}")
 
     def skip_to_next(self):
         if not self.broadcasting:
@@ -493,7 +525,7 @@ class PlaylistScheduler:
                 filename = current_video['filename'][:30] + "..." if len(current_video['filename']) > 30 else current_video['filename']
                 self.live_status_label.configure(text=f"🔴 NOW: {filename}")
 
-    # ----- Editing helpers -----
+    # ---------- Editing helpers ----------
     def get_selected_indices(self):
         return [self.tree.index(item) for item in self.tree.selection()]
 
@@ -527,6 +559,7 @@ class PlaylistScheduler:
             self.videos.clear()
             self.update_timeline()
 
+    # ---------- Export / Import ----------
     def export_playlist(self):
         """Export current schedule to JSON with absolute paths and timings."""
         if not self.videos:
@@ -558,7 +591,7 @@ class PlaylistScheduler:
                 "start_time": int(current_time),
                 "start_formatted": self.format_duration(current_time),
                 "end_formatted": self.format_duration(current_time + video["duration"]),
-                "scene_name": f"Video_{i+1:03d}_{os.path.splitext(video['filename'])[0][:15]}"
+                "scene_name": f"Video_{i+1:03d}_{self._sanitize_name(os.path.splitext(video['filename'])[0], 32)}"
             })
             current_time += video["duration"]
 
@@ -569,8 +602,7 @@ class PlaylistScheduler:
         except Exception as e:
             messagebox.showerror("Export Error", f"Could not write file:\n{e}")
 
-    # ---------------------------
-
+    # ---------- Video file helpers ----------
     def get_video_duration(self, filepath):
         """Prefer ffprobe when bundled; otherwise fallback heuristic."""
         try:
