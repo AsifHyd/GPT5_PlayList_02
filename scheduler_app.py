@@ -23,12 +23,13 @@ import obsws_python as obs
 class PlaylistScheduler:
     def __init__(self, root):
         self.root = root
-        self.root.title("OBS Playlist Scheduler v1.3 - Live Broadcast Automation")
-        self.root.geometry("1400x820")
+        self.root.title("OBS Playlist Scheduler v1.4 - Live Broadcast Automation")
+        self.root.geometry("1480x880")
 
         # Data
         self.videos = []
-        self.fillers = []  # list of file paths used for filler playback
+        self.clipboard_data = []
+        self.fillers = []               # filler media files
         self.broadcasting = False
         self.broadcast_thread = None
         self.obs_client = None
@@ -45,10 +46,18 @@ class PlaylistScheduler:
         # Map scene -> input name (for media control)
         self.scene_to_input = {}
 
-        # UI
+        # Theme colors
+        self.bg = "#2d2d2d"
+        self.fg = "#e6e6e6"
+        self.acc = "#3b3b3b"
+        self.sel = "#4a4a4a"
+        self.ok = "#66ff99"
+        self.warn = "#ffcc66"
+        self.err = "#ff6666"
+
         self.setup_ui()
-        self.setup_drag_drop()
         self.apply_dark_theme()
+        self.setup_drag_drop()
 
     # ---------- Utilities ----------
     def _sanitize_name(self, name: str, max_len: int = 64) -> str:
@@ -56,56 +65,63 @@ class PlaylistScheduler:
         cleaned = "".join(ch if ch in allowed else "_" for ch in name)
         return cleaned[:max_len]
 
-    # ---------- UI ----------
+    # ---------- UI / Theme ----------
     def apply_dark_theme(self):
-        # Simple professional dark theme
-        bg = "#2d2d2d"
-        fg = "#e6e6e6"
-        acc = "#3b3b3b"
-        sel = "#4a4a4a"
-
         try:
-            self.root.configure(bg=bg)
+            self.root.configure(bg=self.bg)
             style = ttk.Style()
-            # Use 'clam' for broad widget coverage
             try:
                 style.theme_use("clam")
             except tk.TclError:
                 pass
 
-            style.configure(".", background=bg, foreground=fg)
-            style.configure("TFrame", background=bg)
-            style.configure("TLabelframe", background=bg, foreground=fg)
-            style.configure("TLabelframe.Label", background=bg, foreground=fg)
-            style.configure("TLabel", background=bg, foreground=fg)
-            style.configure("TButton", background=acc, foreground=fg)
+            style.configure(".", background=self.bg, foreground=self.fg)
+            style.configure("TFrame", background=self.bg)
+            style.configure("TLabelframe", background=self.bg, foreground=self.fg)
+            style.configure("TLabelframe.Label", background=self.bg, foreground=self.fg)
+            style.configure("TLabel", background=self.bg, foreground=self.fg)
+            style.configure("TButton", background=self.acc, foreground=self.fg, padding=5)
             style.map("TButton",
-                      background=[("active", sel)],
+                      background=[("active", self.sel)],
                       relief=[("pressed", "sunken"), ("!pressed", "raised")])
-            style.configure("TEntry", fieldbackground=acc, foreground=fg, insertcolor=fg)
+            style.configure("TEntry", fieldbackground=self.acc, foreground=self.fg, insertcolor=self.fg)
             style.configure("Treeview",
-                            background=acc,
-                            fieldbackground=acc,
-                            foreground=fg)
+                            background=self.acc,
+                            fieldbackground=self.acc,
+                            foreground=self.fg)
             style.map("Treeview",
-                      background=[("selected", sel)],
-                      foreground=[("selected", fg)])
-            style.configure("TScrollbar", background=acc, troughcolor=bg)
+                      background=[("selected", self.sel)],
+                      foreground=[("selected", self.fg)])
+            style.configure("TScrollbar", background=self.acc, troughcolor=self.bg)
         except Exception:
             pass
 
     def setup_ui(self):
+        # Main container
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
         main_frame.rowconfigure(1, weight=1)
 
-        # Left panel
-        left_panel = ttk.LabelFrame(main_frame, text="Broadcast Control Center", padding="5")
-        left_panel.grid(row=0, column=0, rowspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 10))
+        # Left panel with vertical scroll (so buttons never get hidden)
+        left_container = ttk.Frame(main_frame)
+        left_container.grid(row=0, column=0, rowspan=2, sticky=(tk.N, tk.S))
+        self.left_canvas = tk.Canvas(left_container, width=360, highlightthickness=0, bg=self.bg)
+        left_scroll = ttk.Scrollbar(left_container, orient=tk.VERTICAL, command=self.left_canvas.yview)
+        self.left_inner = ttk.Frame(self.left_canvas)
+        self.left_inner.bind("<Configure>", lambda e: self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all")))
+        self.left_canvas.create_window((0, 0), window=self.left_inner, anchor="nw")
+        self.left_canvas.configure(yscrollcommand=left_scroll.set)
+        self.left_canvas.grid(row=0, column=0, sticky=(tk.N, tk.S))
+        left_scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        left_container.rowconfigure(0, weight=1)
+
+        # Section: Broadcast Control Center
+        left_panel = ttk.LabelFrame(self.left_inner, text="Broadcast Control Center", padding="6")
+        left_panel.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        left_panel.columnconfigure(0, weight=1)
 
         # File operations
         ttk.Label(left_panel, text="📁 File Management", font=('Arial', 9, 'bold')).grid(row=0, column=0, pady=(0, 5), sticky=tk.W)
@@ -116,16 +132,12 @@ class PlaylistScheduler:
 
         # Schedule Settings
         ttk.Label(left_panel, text="⏰ Schedule Settings", font=('Arial', 9, 'bold')).grid(row=4, column=0, pady=(0, 5), sticky=tk.W)
-
         time_frame = ttk.Frame(left_panel)
         time_frame.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=2)
         time_frame.columnconfigure(1, weight=1)
-
         ttk.Label(time_frame, text="Start Time:").grid(row=0, column=0, padx=(0, 5))
         self.start_time_var = tk.StringVar(value="00:00:00")
-        self.start_time_entry = ttk.Entry(time_frame, textvariable=self.start_time_var, width=10)
-        self.start_time_entry.grid(row=0, column=1, sticky=tk.W)
-
+        ttk.Entry(time_frame, textvariable=self.start_time_var, width=10).grid(row=0, column=1, sticky=tk.W)
         ttk.Button(left_panel, text="⏰ Set Current Time", command=self.set_current_time).grid(row=6, column=0, pady=2, sticky=(tk.W, tk.E))
 
         ttk.Separator(left_panel, orient='horizontal').grid(row=7, column=0, sticky=(tk.W, tk.E), pady=5)
@@ -137,109 +149,99 @@ class PlaylistScheduler:
         ttk.Button(left_panel, text="Delete Selected", command=self.delete_selected).grid(row=11, column=0, pady=1, sticky=(tk.W, tk.E))
         ttk.Button(left_panel, text="Clear All", command=self.clear_all).grid(row=12, column=0, pady=1, sticky=(tk.W, tk.E))
 
+        # Copy/Paste block
         ttk.Separator(left_panel, orient='horizontal').grid(row=13, column=0, sticky=(tk.W, tk.E), pady=5)
+        cp_frame = ttk.Frame(left_panel)
+        cp_frame.grid(row=14, column=0, sticky=(tk.W, tk.E))
+        ttk.Button(cp_frame, text="📋 Copy Block", command=self.copy_block).grid(row=0, column=0, padx=(0, 4), sticky=(tk.W, tk.E))
+        ttk.Button(cp_frame, text="📥 Paste Block", command=self.paste_block).grid(row=0, column=1, sticky=(tk.W, tk.E))
+        cp_frame.columnconfigure(0, weight=1)
+        cp_frame.columnconfigure(1, weight=1)
+
+        ttk.Separator(left_panel, orient='horizontal').grid(row=15, column=0, sticky=(tk.W, tk.E), pady=5)
 
         # OBS Connection
-        ttk.Label(left_panel, text="🔗 OBS Connection", font=('Arial', 9, 'bold')).grid(row=14, column=0, pady=(0, 5), sticky=tk.W)
-
+        ttk.Label(left_panel, text="🔗 OBS Connection", font=('Arial', 9, 'bold')).grid(row=16, column=0, pady=(0, 5), sticky=tk.W)
         conn_frame = ttk.Frame(left_panel)
-        conn_frame.grid(row=15, column=0, sticky=(tk.W, tk.E), pady=(0, 4))
+        conn_frame.grid(row=17, column=0, sticky=(tk.W, tk.E), pady=(0, 4))
         conn_frame.columnconfigure(1, weight=1)
-
         ttk.Label(conn_frame, text="Host").grid(row=0, column=0, padx=(0, 5), sticky=tk.W)
         ttk.Entry(conn_frame, textvariable=self.obs_host_var, width=14).grid(row=0, column=1, sticky=(tk.W, tk.E))
-
         ttk.Label(conn_frame, text="Port").grid(row=1, column=0, padx=(0, 5), sticky=tk.W)
         ttk.Entry(conn_frame, textvariable=self.obs_port_var, width=8).grid(row=1, column=1, sticky=(tk.W, tk.E))
-
         ttk.Label(conn_frame, text="Password").grid(row=2, column=0, padx=(0, 5), sticky=tk.W)
         ttk.Entry(conn_frame, textvariable=self.obs_password_var, show="*", width=14).grid(row=2, column=1, sticky=(tk.W, tk.E))
-
         self.connect_btn = ttk.Button(left_panel, text="Connect to OBS", command=self.connect_obs)
-        self.connect_btn.grid(row=16, column=0, pady=2, sticky=(tk.W, tk.E))
-
-        self.connection_status = ttk.Label(left_panel, text="● Disconnected", foreground="#ff6666", font=('Arial', 8))
-        self.connection_status.grid(row=17, column=0, sticky=tk.W)
-
+        self.connect_btn.grid(row=18, column=0, pady=2, sticky=(tk.W, tk.E))
+        self.connection_status = ttk.Label(left_panel, text="● Disconnected", foreground=self.err, font=('Arial', 8))
+        self.connection_status.grid(row=19, column=0, sticky=tk.W)
         self.setup_btn = ttk.Button(left_panel, text="🎬 Setup OBS Scenes", command=self.setup_obs_scenes)
-        self.setup_btn.grid(row=18, column=0, pady=2, sticky=(tk.W, tk.E))
+        self.setup_btn.grid(row=20, column=0, pady=2, sticky=(tk.W, tk.E))
         self.setup_btn.configure(state='disabled')
-
-        # Remove app scenes
         self.remove_btn = ttk.Button(left_panel, text="🗑 Remove Your Scenes", command=self.remove_app_scenes)
-        self.remove_btn.grid(row=19, column=0, pady=2, sticky=(tk.W, tk.E))
+        self.remove_btn.grid(row=21, column=0, pady=2, sticky=(tk.W, tk.E))
         self.remove_btn.configure(state='disabled')
 
-        ttk.Separator(left_panel, orient='horizontal').grid(row=20, column=0, sticky=(tk.W, tk.E), pady=5)
+        ttk.Separator(left_panel, orient='horizontal').grid(row=22, column=0, sticky=(tk.W, tk.E), pady=5)
 
         # Live broadcast controls
-        ttk.Label(left_panel, text="🔴 Live Broadcast", font=('Arial', 9, 'bold')).grid(row=21, column=0, pady=(0, 5), sticky=tk.W)
-
+        ttk.Label(left_panel, text="🔴 Live Broadcast", font=('Arial', 9, 'bold')).grid(row=23, column=0, pady=(0, 5), sticky=tk.W)
         self.start_btn = ttk.Button(left_panel, text="▶ Start Broadcasting", command=self.start_broadcast)
-        self.start_btn.grid(row=22, column=0, pady=2, sticky=(tk.W, tk.E))
+        self.start_btn.grid(row=24, column=0, pady=2, sticky=(tk.W, tk.E))
         self.start_btn.configure(state='disabled')
-
         self.stop_btn = ttk.Button(left_panel, text="⏹ Stop Broadcasting", command=self.stop_broadcast)
-        self.stop_btn.grid(row=23, column=0, pady=2, sticky=(tk.W, tk.E))
+        self.stop_btn.grid(row=25, column=0, pady=2, sticky=(tk.W, tk.E))
         self.stop_btn.configure(state='disabled')
-
         self.skip_btn = ttk.Button(left_panel, text="⏭ Skip to Next", command=self.skip_to_next)
-        self.skip_btn.grid(row=24, column=0, pady=1, sticky=(tk.W, tk.E))
+        self.skip_btn.grid(row=26, column=0, pady=1, sticky=(tk.W, tk.E))
         self.skip_btn.configure(state='disabled')
 
-        # Fillers management
-        ttk.Separator(left_panel, orient='horizontal').grid(row=25, column=0, sticky=(tk.W, tk.E), pady=5)
-        ttk.Label(left_panel, text="🧩 Fillers (loop when idle)", font=('Arial', 9, 'bold')).grid(row=26, column=0, sticky=tk.W)
-        ttk.Button(left_panel, text="➕ Add Fillers", command=self.add_fillers).grid(row=27, column=0, pady=1, sticky=(tk.W, tk.E))
-        ttk.Button(left_panel, text="🧹 Clear Fillers", command=self.clear_fillers).grid(row=28, column=0, pady=1, sticky=(tk.W, tk.E))
+        ttk.Separator(left_panel, orient='horizontal').grid(row=27, column=0, sticky=(tk.W, tk.E), pady=5)
 
-        ttk.Separator(left_panel, orient='horizontal').grid(row=29, column=0, sticky=(tk.W, tk.E), pady=5)
-        ttk.Button(left_panel, text="💾 Export Playlist", command=self.export_playlist).grid(row=30, column=0, pady=5, sticky=(tk.W, tk.E))
+        # Fillers management (clearly visible)
+        ttk.Label(left_panel, text="🧩 Fillers (loop when idle)", font=('Arial', 9, 'bold')).grid(row=28, column=0, sticky=tk.W)
+        ttk.Button(left_panel, text="➕ Add Fillers", command=self.add_fillers).grid(row=29, column=0, pady=1, sticky=(tk.W, tk.E))
+        ttk.Button(left_panel, text="🧹 Clear Fillers", command=self.clear_fillers).grid(row=30, column=0, pady=1, sticky=(tk.W, tk.E))
 
-        left_panel.columnconfigure(0, weight=1)
+        ttk.Separator(left_panel, orient='horizontal').grid(row=31, column=0, sticky=(tk.W, tk.E), pady=5)
+        ttk.Button(left_panel, text="💾 Export Playlist", command=self.export_playlist).grid(row=32, column=0, pady=5, sticky=(tk.W, tk.E))
 
-        # Right panel - Timeline & status
-        right_panel = ttk.LabelFrame(main_frame, text="🎬 Timeline & Live Status", padding="5")
+        # Right: Timeline & status
+        right_panel = ttk.LabelFrame(main_frame, text="🎬 Timeline & Live Status", padding="6")
         right_panel.grid(row=0, column=1, rowspan=2, sticky=(tk.W, tk.E, tk.N, tk.S))
+        right_panel.columnconfigure(0, weight=1)
+        right_panel.rowconfigure(2, weight=1)
 
         status_frame = ttk.Frame(right_panel)
-        status_frame.grid(row=0, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 5))
+        status_frame.grid(row=0, column=0, sticky=(tk.W, tk.E))
         status_frame.columnconfigure(1, weight=1)
-
         ttk.Label(status_frame, text="🔴 STATUS:", font=('Arial', 10, 'bold')).grid(row=0, column=0, padx=(0, 6))
         self.live_status_label = ttk.Label(status_frame, text="Not Broadcasting", font=('Arial', 10))
         self.live_status_label.grid(row=0, column=1, sticky=tk.W)
-
         self.time_label = ttk.Label(status_frame, text="", font=('Arial', 10, 'bold'))
         self.time_label.grid(row=0, column=2, padx=(5, 0), sticky=tk.E)
 
         # Current file progress
-        self.file_time_label = ttk.Label(status_frame, text="", font=('Arial', 10))
-        self.file_time_label.grid(row=1, column=0, columnspan=3, sticky=tk.W)
+        self.file_time_label = ttk.Label(right_panel, text="", font=('Arial', 10))
+        self.file_time_label.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(2, 6))
 
         columns = ('status', 'filename', 'duration', 'start_time', 'end_time')
-        self.tree = ttk.Treeview(right_panel, columns=columns, show='headings', height=26, selectmode='extended')
-
+        self.tree = ttk.Treeview(right_panel, columns=columns, show='headings', height=28, selectmode='extended')
         self.tree.heading('status', text='●')
         self.tree.heading('filename', text='Filename')
         self.tree.heading('duration', text='Duration')
         self.tree.heading('start_time', text='Start Time')
         self.tree.heading('end_time', text='End Time')
-
-        self.tree.column('status', width=34, minwidth=30)
-        self.tree.column('filename', width=380, minwidth=220)
-        self.tree.column('duration', width=90, minwidth=80, anchor=tk.CENTER)
-        self.tree.column('start_time', width=90, minwidth=80, anchor=tk.CENTER)
-        self.tree.column('end_time', width=90, minwidth=80, anchor=tk.CENTER)
+        self.tree.column('status', width=34, minwidth=30, anchor=tk.CENTER)
+        self.tree.column('filename', width=520, minwidth=260)
+        self.tree.column('duration', width=100, minwidth=80, anchor=tk.CENTER)
+        self.tree.column('start_time', width=100, minwidth=80, anchor=tk.CENTER)
+        self.tree.column('end_time', width=100, minwidth=80, anchor=tk.CENTER)
 
         scrollbar = ttk.Scrollbar(right_panel, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
-
-        self.tree.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        scrollbar.grid(row=1, column=1, sticky=(tk.N, tk.S))
-
-        right_panel.columnconfigure(0, weight=1)
-        right_panel.rowconfigure(1, weight=1)
+        self.tree.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        scrollbar.grid(row=2, column=1, sticky=(tk.N, tk.S))
 
         # Context menu
         self.context_menu = tk.Menu(self.root, tearoff=0)
@@ -307,8 +309,8 @@ class PlaylistScheduler:
         # Per-file progress using GetMediaInputStatus
         try:
             if self.obs_client:
-                # Determine current Program scene and its input
                 input_name = None
+                scene_name = None
                 if 0 <= self.current_video_index < len(self.videos):
                     base = os.path.splitext(self.videos[self.current_video_index]['filename'])[0]
                     scene_name = f"Video_{self.current_video_index+1:03d}_{self._sanitize_name(base, 32)}"
@@ -319,29 +321,19 @@ class PlaylistScheduler:
 
                 if input_name:
                     st = self.obs_client.get_media_input_status(input_name)
-                    data = getattr(st, "responseData", None) or getattr(st, "datain", None) or getattr(st, "data", lambda: {})()
-                    # obsws_python returns a dict-like; try common accessors
-                    if isinstance(data, dict):
-                        cursor = int(data.get("mediaCursor", 0))
-                        dur = int(data.get("mediaDuration", 0))
-                        state = data.get("mediaState", "")
-                    else:
-                        # Fallback: object with attributes
-                        cursor = int(getattr(data, "mediaCursor", 0))
-                        dur = int(getattr(data, "mediaDuration", 0))
-                        state = getattr(data, "mediaState", "")
-
-                    played = self.format_duration(cursor / 1000 if cursor > 1000 else cursor)
-                    total = self.format_duration(dur / 1000 if dur > 1000 else max(dur, 1))
-                    remaining_sec = max((dur - cursor) / 1000, 0) if dur and cursor else 0
-                    remaining = self.format_duration(remaining_sec)
-                    self.file_time_label.configure(text=f"File: {played} / {total}  (−{remaining}) [{state}]")
+                    data = getattr(st, "responseData", None) or {}
+                    cursor = int(data.get("mediaCursor", 0))
+                    dur = int(data.get("mediaDuration", 0))
+                    state = data.get("mediaState", "")
+                    # Values are in ms in v5; convert to seconds for display math
+                    played_s = cursor / 1000 if dur >= 1000 else cursor
+                    total_s = max(dur / 1000 if dur >= 1000 else dur, 0.001)
+                    remaining_s = max(total_s - played_s, 0)
+                    self.file_time_label.configure(
+                        text=f"File: {self.format_duration(played_s)} / {self.format_duration(total_s)}  (−{self.format_duration(remaining_s)}) [{state}]"
+                    )
                 else:
-                    # No active media
-                    if self.fillers_active:
-                        self.file_time_label.configure(text="Fillers are playing")
-                    else:
-                        self.file_time_label.configure(text="Nothing is playing")
+                    self.file_time_label.configure(text="Fillers are playing" if self.fillers_active else "Nothing is playing")
         except Exception:
             # Non-fatal UI update error
             pass
@@ -368,7 +360,7 @@ class PlaylistScheduler:
             self.obs_client = obs.ReqClient(host=host, port=port, password=password, timeout=3)
             version_info = self.obs_client.get_version()
 
-            self.connection_status.configure(text="● Connected", foreground="#66ff99")
+            self.connection_status.configure(text="● Connected", foreground=self.ok)
             self.connect_btn.configure(text="Disconnect", command=self.disconnect_obs)
             self.setup_btn.configure(state='normal')
             self.remove_btn.configure(state='normal')
@@ -397,7 +389,7 @@ class PlaylistScheduler:
                 pass
             self.obs_client = None
 
-        self.connection_status.configure(text="● Disconnected", foreground="#ff6666")
+        self.connection_status.configure(text="● Disconnected", foreground=self.err)
         self.connect_btn.configure(text="Connect to OBS", command=self.connect_obs)
         self.setup_btn.configure(state='disabled')
         self.remove_btn.configure(state='disabled')
@@ -483,59 +475,55 @@ class PlaylistScheduler:
             messagebox.showwarning("Remove Scenes", "Connect to OBS first.")
             return
         try:
-            # Get scenes
-            sl = self.obs_client.get_scene_list()
-            data = getattr(sl, "responseData", None) or getattr(sl, "datain", None) or getattr(sl, "data", lambda: {})()
+            resp = self.obs_client.get_scene_list()
+            data = getattr(resp, "responseData", None) or {}
+            raw_scenes = data.get("scenes", []) if isinstance(data, dict) else []
             scenes = []
-            if isinstance(data, dict) and "scenes" in data:
-                scenes = [s.get("sceneName") for s in data["scenes"] if isinstance(s, dict)]
-            elif hasattr(sl, "scenes"):
-                scenes = [s.sceneName for s in sl.scenes]  # fallback
+            for s in raw_scenes:
+                if isinstance(s, dict) and "sceneName" in s:
+                    scenes.append(s["sceneName"])
 
-            # Choose a safe target scene (first non-app scene) for switching before removals
+            # Determine which to delete
             to_delete = []
             for name in scenes:
                 if name == "Fillers_Scene":
                     to_delete.append(name)
                 elif name.startswith("Video_"):
-                    # Very conservative: ensure name has Video_###_ pattern
                     parts = name.split("_", 2)
                     if len(parts) >= 2 and len(parts[1]) == 3 and parts[1].isdigit():
                         to_delete.append(name)
 
+            # Safe scene to switch to
             safe_scene = None
             for name in scenes:
                 if name not in to_delete:
                     safe_scene = name
                     break
 
-            if not safe_scene and to_delete:
+            if not to_delete:
+                messagebox.showinfo("Remove Scenes", "No app-created scenes found.")
+                return
+
+            if not safe_scene:
                 messagebox.showwarning("Remove Scenes", "No safe scene to switch to before deletion; please create one manually.")
                 return
 
-            if to_delete:
-                if messagebox.askyesno("Confirm", f"Remove {len(to_delete)} scenes created by the app?"):
-                    # Switch away before deletion
-                    if safe_scene:
-                        try:
-                            self.obs_client.set_current_program_scene(safe_scene)
-                        except Exception:
-                            pass
+            if messagebox.askyesno("Confirm", f"Remove {len(to_delete)} scenes created by the app?"):
+                try:
+                    self.obs_client.set_current_program_scene(safe_scene)
+                except Exception:
+                    pass
 
-                    # Remove one by one
-                    removed = 0
-                    for name in to_delete:
-                        try:
-                            # v5 supports DeleteScene/RemoveScene; obsws-python exposes remove_scene
-                            self.obs_client.remove_scene(name)
-                            removed += 1
-                        except Exception as e:
-                            print(f"Remove failed for {name}: {e}")
+                removed = 0
+                for name in to_delete:
+                    try:
+                        self.obs_client.remove_scene(name)
+                        removed += 1
+                    except Exception as e:
+                        print(f"Remove failed for {name}: {e}")
 
-                    self.status_var.set(f"Removed {removed} app scenes")
-                    messagebox.showinfo("Remove Scenes", f"Removed {removed} scenes.")
-            else:
-                messagebox.showinfo("Remove Scenes", "No app-created scenes found.")
+                self.status_var.set(f"Removed {removed} app scenes")
+                messagebox.showinfo("Remove Scenes", f"Removed {removed} scenes.")
         except Exception as e:
             messagebox.showerror("Remove Scenes", f"Error: {e}")
 
@@ -547,7 +535,6 @@ class PlaylistScheduler:
             return
         self.fillers = list(files)
         self.status_var.set(f"Fillers set: {len(self.fillers)} item(s)")
-        # If OBS connected, (re)build the Fillers_Scene
         if self.obs_client:
             self.ensure_fillers_scene()
 
@@ -558,29 +545,25 @@ class PlaylistScheduler:
     def ensure_fillers_scene(self):
         """Create/refresh Fillers_Scene using VLC playlist if possible, else first file loop."""
         try:
-            # Create scene
             try:
                 self.obs_client.create_scene("Fillers_Scene")
             except Exception:
                 pass
 
-            # Remove any prior filler input if present
-            # We'll (re)create a single input "Fillers_Playlist"
+            # Remove previous playlist/input if exists
             try:
-                # If it exists, remove it before recreating
                 self.obs_client.remove_input("Fillers_Playlist")
             except Exception:
                 pass
 
             if len(self.fillers) > 1:
-                # VLC playlist input
                 playlist = [{"value": os.path.abspath(p).replace("\\", "/"), "hidden": False, "selected": True}
                             for p in self.fillers]
                 input_settings = {
                     "playlist": playlist,
                     "loop": True,
                     "shuffle": False,
-                    "playback_behavior": "always_play"  # keep playing even if not visible; will still be restarted on activate
+                    "playback_behavior": "always_play"
                 }
                 self.obs_client.create_input(
                     "Fillers_Scene",
@@ -590,7 +573,6 @@ class PlaylistScheduler:
                     True
                 )
             else:
-                # Single media loop via ffmpeg_source
                 file_path = os.path.abspath(self.fillers[0]).replace("\\", "/")
                 input_settings = {
                     "local_file": file_path,
@@ -619,20 +601,19 @@ class PlaylistScheduler:
             return
         if not self.fillers:
             self.fillers_active = False
-            self.live_status_label.configure(text="Nothing is playing")
+            self.live_status_label.configure(text="Nothing is playing", foreground=self.fg)
             return
-        # Ensure filler scene exists
         self.ensure_fillers_scene()
         try:
             self.obs_client.set_current_program_scene("Fillers_Scene")
-            # Restart fillers playlist to ensure visible playback
             inp = self.scene_to_input.get("Fillers_Scene")
             if inp:
                 self.obs_client.trigger_media_input_action(
                     inp, "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART"
                 )
             self.fillers_active = True
-            self.live_status_label.configure(text="Fillers are playing", foreground="#ffcc66")
+            self.live_status_label.configure(text="Fillers are playing", foreground=self.warn)
+            self.file_time_label.configure(text="Fillers are playing")
         except Exception as e:
             print(f"Filler playback error: {e}")
 
@@ -642,7 +623,6 @@ class PlaylistScheduler:
             messagebox.showwarning("Broadcast Error", "Connect to OBS first.")
             return
         if not self.videos:
-            # No schedule -> play fillers if available
             self.broadcasting = False
             self.play_fillers_if_needed()
             return
@@ -663,14 +643,14 @@ class PlaylistScheduler:
         self.skip_btn.configure(state='normal')
         self.remove_btn.configure(state='disabled')
 
-        # Immediately start first video (no need to press Skip)
+        # Immediately start first video (no manual Skip required)
         try:
             self.switch_to_video(0)
             self.current_video_index = 0
         except Exception as e:
             print(f"Immediate start error: {e}")
 
-        self.live_status_label.configure(text="🔴 BROADCASTING LIVE", foreground="#ff6666")
+        self.live_status_label.configure(text="🔴 BROADCASTING LIVE", foreground=self.err)
         self.status_var.set(f"🔴 Live broadcast started from {self.start_time_var.get()}")
 
     def stop_broadcast(self):
@@ -695,11 +675,40 @@ class PlaylistScheduler:
             try:
                 current_time = time.time()
                 elapsed = (current_time - self.broadcast_start_time) + self.manual_time_offset
-                target_index = self.get_video_at_time(elapsed)
 
-                if target_index != self.current_video_index and target_index >= 0:
+                # Time-based target index
+                target_index_time = self.get_video_at_time(elapsed)
+
+                # Media-based advance: if current media ended, move to next
+                target_index_media = -1
+                if 0 <= self.current_video_index < len(self.videos):
+                    base = os.path.splitext(self.videos[self.current_video_index]['filename'])[0]
+                    scene_name = f"Video_{self.current_video_index+1:03d}_{self._sanitize_name(base, 32)}"
+                    input_name = self.scene_to_input.get(scene_name)
+                    if input_name:
+                        try:
+                            st = self.obs_client.get_media_input_status(input_name)
+                            data = getattr(st, "responseData", None) or {}
+                            state = data.get("mediaState", "")
+                            cursor = int(data.get("mediaCursor", 0))
+                            dur = int(data.get("mediaDuration", 0))
+                            if state == "OBS_MEDIA_STATE_ENDED" or (dur and cursor >= dur):
+                                target_index_media = self.current_video_index + 1
+                        except Exception:
+                            pass
+
+                # Decide the next index
+                target_index = max(target_index_time, target_index_media)
+
+                if target_index != self.current_video_index and 0 <= target_index < len(self.videos):
                     self.switch_to_video(target_index)
                     self.current_video_index = target_index
+
+                # Reached end of schedule
+                if target_index >= len(self.videos):
+                    self.broadcasting = False
+                    self.play_fillers_if_needed()
+                    break
 
                 time.sleep(0.5)
             except Exception as e:
@@ -713,7 +722,7 @@ class PlaylistScheduler:
             if current_time <= elapsed_seconds < video_end:
                 return i
             current_time = video_end
-        return -1
+        return len(self.videos)  # if elapsed beyond end, indicate finished
 
     def switch_to_video(self, video_index):
         """Switch Program scene and explicitly restart its media input."""
@@ -721,36 +730,38 @@ class PlaylistScheduler:
             if 0 <= video_index < len(self.videos):
                 base = os.path.splitext(self.videos[video_index]['filename'])[0]
                 scene_name = f"Video_{video_index+1:03d}_{self._sanitize_name(base, 32)}"
-
-                # Switch Program scene
                 self.obs_client.set_current_program_scene(scene_name)
-
-                # Restart media to ensure playback in Program (works reliably in Studio Mode)
                 input_name = self.scene_to_input.get(scene_name)
                 if input_name:
                     self.obs_client.trigger_media_input_action(
                         input_name,
                         "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART"
                     )
-                # Update status
                 filename = self.videos[video_index]['filename']
-                self.live_status_label.configure(text=f"🔴 NOW: {filename}", foreground="#ff6666")
+                self.live_status_label.configure(text=f"🔴 NOW: {filename}", foreground=self.err)
                 self.fillers_active = False
+                # Update marker
+                for child in self.tree.get_children():
+                    self.tree.set(child, 'status', '')
+                if 0 <= video_index < len(self.tree.get_children()):
+                    curr = self.tree.get_children()[video_index]
+                    self.tree.set(curr, 'status', '▶')
         except Exception as e:
             print(f"Error switching/starting media: {e}")
 
     def skip_to_next(self):
         if not self.broadcasting:
             return
-        current_time = time.time()
-        elapsed = (current_time - self.broadcast_start_time) + self.manual_time_offset
-        next_index = self.get_video_at_time(elapsed) + 1
+        next_index = self.current_video_index + 1
         if next_index < len(self.videos):
+            self.switch_to_video(next_index)
+            self.current_video_index = next_index
+            # Adjust telecast offset so elapsed math keeps alignment
             target_time = sum(video['duration'] for video in self.videos[:next_index])
-            adjustment = target_time - elapsed
-            self.manual_time_offset += adjustment
+            now = time.time()
+            elapsed = (now - self.broadcast_start_time) + self.manual_time_offset
+            self.manual_time_offset += (target_time - elapsed)
         else:
-            # End reached -> play fillers if available
             self.stop_broadcast()
 
     def jump_to_video(self):
@@ -761,10 +772,9 @@ class PlaylistScheduler:
             self.start_broadcast()
         index = self.tree.index(selection[0])
         target_time = sum(video['duration'] for video in self.videos[:index])
-        current_time = time.time()
-        elapsed = (current_time - self.broadcast_start_time) + self.manual_time_offset
-        adjustment = target_time - elapsed
-        self.manual_time_offset += adjustment
+        now = time.time()
+        elapsed = (now - self.broadcast_start_time) + self.manual_time_offset
+        self.manual_time_offset += (target_time - elapsed)
 
     # ---------- Editing helpers ----------
     def get_selected_indices(self):
@@ -799,9 +809,25 @@ class PlaylistScheduler:
         if self.videos and messagebox.askyesno("Clear All", "Clear entire playlist?"):
             self.videos.clear()
             self.update_timeline()
-            # If now empty, auto-switch to fillers if available
             if self.obs_client and self.fillers:
                 self.play_fillers_if_needed()
+
+    def copy_block(self):
+        sel = self.get_selected_indices()
+        if not sel:
+            return
+        self.clipboard_data = [self.videos[i].copy() for i in sel]
+        self.status_var.set(f"Copied {len(sel)} item(s)")
+
+    def paste_block(self):
+        if not self.clipboard_data:
+            return
+        sel = self.get_selected_indices()
+        insert_at = sel[-1] + 1 if sel else len(self.videos)
+        for i, v in enumerate(self.clipboard_data):
+            self.videos.insert(insert_at + i, v.copy())
+        self.update_timeline()
+        self.status_var.set(f"Pasted {len(self.clipboard_data)} item(s) at position {insert_at+1}")
 
     # ---------- Export ----------
     def export_playlist(self):
@@ -905,8 +931,7 @@ class PlaylistScheduler:
         else:
             self.videos.extend(new_videos)
 
-        # Immediate total duration display as soon as videos are added
-        self.update_timeline()
+        self.update_timeline()  # updates total duration immediately
 
     # ---------- Timeline ----------
     def update_timeline(self):
