@@ -35,7 +35,7 @@ class PlaylistScheduler:
         self.broadcast_start_time = None
         self.manual_time_offset = 0
 
-        # OBS connection fields (defaults for OBS 28+ / 31.x)
+        # OBS connection fields (defaults for OBS 28+/31.x)
         self.obs_host_var = tk.StringVar(value="127.0.0.1")
         self.obs_port_var = tk.StringVar(value="4455")
         self.obs_password_var = tk.StringVar(value="")
@@ -488,13 +488,12 @@ class PlaylistScheduler:
         if 0 <= current_index < len(self.tree.get_children()):
             current_item = self.tree.get_children()[current_index]
             self.tree.set(current_item, 'status', '▶')
-                # Update status label
             if current_index < len(self.videos):
                 current_video = self.videos[current_index]
                 filename = current_video['filename'][:30] + "..." if len(current_video['filename']) > 30 else current_video['filename']
                 self.live_status_label.configure(text=f"🔴 NOW: {filename}")
 
-    # ----- Editing helpers (ensure these exist for Tk commands) -----
+    # ----- Editing helpers -----
     def get_selected_indices(self):
         return [self.tree.index(item) for item in self.tree.selection()]
 
@@ -527,7 +526,50 @@ class PlaylistScheduler:
         if self.videos and messagebox.askyesno("Clear All", "Clear entire playlist?"):
             self.videos.clear()
             self.update_timeline()
-    # ---------------------------------------------------------------
+
+    def export_playlist(self):
+        """Export current schedule to JSON with absolute paths and timings."""
+        if not self.videos:
+            messagebox.showinfo("Export", "No videos to export.")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            title="Export schedule",
+            defaultextension=".json",
+            filetypes=[("Schedule", "*.json"), ("All", "*.*")]
+        )
+        if not filepath:
+            return
+
+        start_seconds = self.time_to_seconds(self.start_time_var.get())
+        schedule = {
+            "videos": [],
+            "start_time": self.start_time_var.get(),
+            "total_duration": sum(v['duration'] for v in self.videos)
+        }
+
+        current_time = start_seconds
+        for i, video in enumerate(self.videos):
+            schedule["videos"].append({
+                "index": i,
+                "filename": video["filename"],
+                "filepath": os.path.abspath(video["filepath"]),
+                "duration": float(video["duration"]),
+                "start_time": int(current_time),
+                "start_formatted": self.format_duration(current_time),
+                "end_formatted": self.format_duration(current_time + video["duration"]),
+                "scene_name": f"Video_{i+1:03d}_{os.path.splitext(video['filename'])[0][:15]}"
+            })
+            current_time += video["duration"]
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(schedule, f, indent=2)
+            messagebox.showinfo("Success", f"Schedule exported!\n\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Could not write file:\n{e}")
+
+    # ---------------------------
 
     def get_video_duration(self, filepath):
         """Prefer ffprobe when bundled; otherwise fallback heuristic."""
