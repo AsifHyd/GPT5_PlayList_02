@@ -1,3 +1,4 @@
+# filename: scheduler_app.py
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import json
@@ -34,7 +35,7 @@ class PlaylistScheduler:
         self.broadcast_start_time = None
         self.manual_time_offset = 0
 
-        # OBS connection fields (defaults for OBS 31.x)
+        # OBS connection fields (defaults for OBS 28+ / 31.x)
         self.obs_host_var = tk.StringVar(value="127.0.0.1")
         self.obs_port_var = tk.StringVar(value="4455")
         self.obs_password_var = tk.StringVar(value="")
@@ -487,12 +488,13 @@ class PlaylistScheduler:
         if 0 <= current_index < len(self.tree.get_children()):
             current_item = self.tree.get_children()[current_index]
             self.tree.set(current_item, 'status', '▶')
+                # Update status label
             if current_index < len(self.videos):
                 current_video = self.videos[current_index]
                 filename = current_video['filename'][:30] + "..." if len(current_video['filename']) > 30 else current_video['filename']
                 self.live_status_label.configure(text=f"🔴 NOW: {filename}")
 
-    # ----- RESTORED METHODS (fixes AttributeError) -----
+    # ----- Editing helpers (ensure these exist for Tk commands) -----
     def get_selected_indices(self):
         return [self.tree.index(item) for item in self.tree.selection()]
 
@@ -501,7 +503,7 @@ class PlaylistScheduler:
         if not indices or indices[0] == 0:
             return
         for i in indices:
-            self.videos[i-1], self.videos[i] = self.videos[i], self.videos[i-1]
+            self.videos[i - 1], self.videos[i] = self.videos[i], self.videos[i - 1]
         self.update_timeline()
 
     def move_down(self):
@@ -509,7 +511,7 @@ class PlaylistScheduler:
         if not indices or indices[-1] == len(self.videos) - 1:
             return
         for i in reversed(indices):
-            self.videos[i+1], self.videos[i] = self.videos[i], self.videos[i+1]
+            self.videos[i + 1], self.videos[i] = self.videos[i], self.videos[i + 1]
         self.update_timeline()
 
     def delete_selected(self):
@@ -525,7 +527,7 @@ class PlaylistScheduler:
         if self.videos and messagebox.askyesno("Clear All", "Clear entire playlist?"):
             self.videos.clear()
             self.update_timeline()
-    # ---------------------------------------------------
+    # ---------------------------------------------------------------
 
     def get_video_duration(self, filepath):
         """Prefer ffprobe when bundled; otherwise fallback heuristic."""
@@ -578,4 +580,74 @@ class PlaylistScheduler:
             new_videos.append({'filepath': filepath, 'filename': filename, 'duration': duration})
 
         if insert_at is not None:
-            for i, video
+            for i, video in enumerate(new_videos):
+                self.videos.insert(insert_at + i, video)
+        else:
+            self.videos.extend(new_videos)
+
+        self.update_timeline()
+        self.status_var.set(f"Added {len(files)} videos")
+
+    def update_timeline(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        start_seconds = self.time_to_seconds(self.start_time_var.get())
+        current_time = start_seconds
+
+        for i, video in enumerate(self.videos):
+            start_time = self.format_duration(current_time)
+            end_time = self.format_duration(current_time + video['duration'])
+            duration_str = self.format_duration(video['duration'])
+            status = '▶' if i == self.current_video_index else ''
+            self.tree.insert('', 'end', values=(status, video['filename'], duration_str, start_time, end_time))
+            current_time += video['duration']
+
+        total_duration = current_time - start_seconds
+        total_str = self.format_duration(total_duration)
+        end_time_str = self.format_duration(current_time)
+        self.status_var.set(f"Schedule: {self.start_time_var.get()} to {end_time_str} | Duration: {total_str} ({len(self.videos)} videos)")
+
+    def on_drop(self, event):
+        if not HAS_DND:
+            return
+        files = self.root.tk.splitlist(event.data)
+        video_files = []
+        for file in files:
+            path = file.strip('{}')
+            if os.path.isfile(path) and Path(path).suffix.lower() in {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}:
+                video_files.append(path)
+        if video_files:
+            self.process_files(video_files)
+
+    def show_context_menu(self, event):
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
+
+    def on_double_click(self, event):
+        selection = self.tree.selection()
+        if selection:
+            index = self.tree.index(selection[0])
+            video = self.videos[index]
+            info = f"File: {video['filename']}\nPath: {video['filepath']}\nDuration: {self.format_duration(video['duration'])}"
+            messagebox.showinfo("Video Info", info)
+
+
+def main():
+    try:
+        root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
+    except Exception:
+        root = tk.Tk()
+
+    app = PlaylistScheduler(root)
+    root.update_idletasks()
+    x = (root.winfo_screenwidth() // 2) - (root.winfo_width() // 2)
+    y = (root.winfo_screenheight() // 2) - (root.winfo_height() // 2)
+    root.geometry(f"+{x}+{y}")
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
