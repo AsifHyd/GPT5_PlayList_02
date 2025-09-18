@@ -1,0 +1,102 @@
+name: Build OBS Scheduler v1.2 - FULL WebSocket Integration
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies with explicit obsws-python
+      shell: pwsh
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller==6.1.0
+        pip install tkinterdnd2==0.3.0
+        pip install obsws-python==1.5.1
+        echo "Verifying obsws-python installation:"
+        python -c "import obsws_python; print('obsws-python version:', obsws_python.__version__)"
+        pip list | Select-String "obsws"
+
+    - name: Fetch ffprobe (robust)
+      shell: pwsh
+      run: |
+        $ffprobe = ""
+        try {
+          Write-Host "Attempting to download ffprobe from BtbN…"
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile "ffmpeg.zip" -UseBasicParsing -ErrorAction Stop
+          Expand-Archive -Path "ffmpeg.zip" -DestinationPath "." -Force
+          $cand = Get-ChildItem -Recurse -Filter "ffprobe.exe" -Path "." -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($cand) {
+            Copy-Item $cand.FullName -Destination ".\ffprobe.exe" -Force
+          }
+        } catch {
+          Write-Warning "BtbN download failed, falling back to Chocolatey…"
+        }
+        if (-not (Test-Path ".\ffprobe.exe")) {
+          try {
+            choco install ffmpeg -y --no-progress
+          } catch {
+            Write-Warning "Chocolatey install failed or unavailable."
+          }
+          $cand2 = Get-ChildItem -Recurse -Filter "ffprobe.exe" -Path "C:\ProgramData\chocolatey" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($cand2) {
+            Copy-Item $cand2.FullName -Destination ".\ffprobe.exe" -Force
+          }
+        }
+        if (Test-Path ".\ffprobe.exe") {
+          Write-Host "ffprobe.exe acquired."
+        } else {
+          Write-Warning "ffprobe.exe not found. Build will proceed; app has a fallback duration path."
+        }
+
+    - name: Build EXE (conditional ffprobe inclusion)
+      shell: pwsh
+      run: |
+        $args = @(
+          "--onedir", "--windowed",
+          "--name", "OBS-Scheduler-v1.2-FULL",
+          "--collect-all", "obsws_python",
+          "--hidden-import", "obsws_python",
+          "--hidden-import", "obsws_python.reqs",
+          "scheduler_app.py"
+        )
+        if (Test-Path ".\ffprobe.exe") {
+          $args = @("--add-binary", "ffprobe.exe;.") + $args
+        }
+        & pyinstaller @args
+
+    - name: Verify build contents
+      shell: pwsh
+      run: |
+        Write-Host "Build directory contents:"
+        Get-ChildItem -Path "dist\OBS-Scheduler-v1.2-FULL" -Recurse | Format-Table Name, Length, LastWriteTime
+        if (Test-Path ".\ffprobe.exe") {
+          Write-Host "ffprobe.exe included at top-level for bundling."
+        } else {
+          Write-Host "ffprobe.exe was not bundled (fallback will be used at runtime)."
+        }
+        Write-Host "Searching for obsws_python files:"
+        Get-ChildItem -Path "dist\OBS-Scheduler-v1.2-FULL" -Recurse | Where-Object { $_.Name -like "*obsws*" } | Format-Table Name, FullName
+
+    - name: Create release package
+      shell: pwsh
+      run: |
+        Compress-Archive -Path "dist/OBS-Scheduler-v1.2-FULL/*" -DestinationPath "OBS-Scheduler-v1.2-FULL-Windows.zip"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: OBS-Scheduler-v1.2-FULL-Windows
+        path: OBS-Scheduler-v1.2-FULL-Windows.zip
