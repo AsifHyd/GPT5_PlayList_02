@@ -10,14 +10,25 @@ import time
 import threading
 from datetime import datetime
 
-# Optional drag & drop support
+# ---- Safe tkdnd detection (prevents crash if tkdnd is missing) ----
+HAS_DND = False
 try:
-    from tkinterdnd2 import DND_FILES, TkinterDnD
-    HAS_DND = True
+    from tkinterdnd2 import DND_FILES, TkinterDnD  # type: ignore
+    try:
+        _probe_root = tk.Tk()
+        try:
+            _probe_root.tk.eval('package require tkdnd')
+            HAS_DND = True
+        except Exception:
+            HAS_DND = False
+        _probe_root.destroy()
+    except Exception:
+        HAS_DND = False
 except Exception:
     HAS_DND = False
+# -------------------------------------------------------------------
 
-import obsws_python as obs
+import obsws_python as obs  # v5 client
 
 
 def seconds_since_midnight() -> int:
@@ -32,21 +43,21 @@ class PlaylistScheduler:
         self.root.geometry("1480x900")
 
         # Data
-        self.videos = []
+        self.videos = []              # list of dicts: filepath, filename, duration
         self.clipboard_data = []
-        self.fillers = []               # filler media files
+        self.fillers = []             # list of filler media file paths
         self.broadcasting = False
         self.broadcast_thread = None
         self.obs_client = None
         self.current_video_index = -1
         self.fillers_active = False
 
-        # Absolute schedule (seconds since midnight) for each item
+        # Absolute schedule (seconds since midnight)
         self.abs_starts = []
         self.abs_ends = []
         self.total_duration = 0
 
-        # OBS connection fields (defaults for OBS 28+/31.x)
+        # OBS connection fields
         self.obs_host_var = tk.StringVar(value="127.0.0.1")
         self.obs_port_var = tk.StringVar(value="4455")
         self.obs_password_var = tk.StringVar(value="")
@@ -74,7 +85,7 @@ class PlaylistScheduler:
         return cleaned[:max_len]
 
     def recompute_schedule_times(self):
-        """Compute absolute start/end for each video from Start Time field (seconds since midnight)."""
+        """Compute absolute start/end times for each item from Start Time."""
         start_seconds = self.time_to_seconds(self.start_time_var.get())
         self.abs_starts = []
         self.abs_ends = []
@@ -86,7 +97,7 @@ class PlaylistScheduler:
             t = t2
         self.total_duration = (t - start_seconds)
 
-    # ---------- UI / Theme ----------
+    # ---------- Theme ----------
     def apply_dark_theme(self):
         try:
             self.root.configure(bg=self.bg)
@@ -119,8 +130,8 @@ class PlaylistScheduler:
         except Exception:
             pass
 
+    # ---------- UI ----------
     def setup_ui(self):
-        # Main container
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         self.root.columnconfigure(0, weight=1)
@@ -141,19 +152,18 @@ class PlaylistScheduler:
         left_scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
         left_container.rowconfigure(0, weight=1)
 
-        # Section: Broadcast Control Center
+        # Group: Control Center
         left_panel = ttk.LabelFrame(self.left_inner, text="Broadcast Control Center", padding="6")
         left_panel.grid(row=0, column=0, sticky=(tk.W, tk.E))
         left_panel.columnconfigure(0, weight=1)
 
-        # File operations
+        # File ops
         ttk.Label(left_panel, text="📁 File Management", font=('Arial', 9, 'bold')).grid(row=0, column=0, pady=(0, 5), sticky=tk.W)
         ttk.Button(left_panel, text="Add Videos", command=self.add_videos).grid(row=1, column=0, pady=2, sticky=(tk.W, tk.E))
         ttk.Button(left_panel, text="Add Folder", command=self.add_folder).grid(row=2, column=0, pady=2, sticky=(tk.W, tk.E))
-
         ttk.Separator(left_panel, orient='horizontal').grid(row=3, column=0, sticky=(tk.W, tk.E), pady=5)
 
-        # Schedule Settings
+        # Schedule settings
         ttk.Label(left_panel, text="⏰ Schedule Settings", font=('Arial', 9, 'bold')).grid(row=4, column=0, pady=(0, 5), sticky=tk.W)
         time_frame = ttk.Frame(left_panel)
         time_frame.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=2)
@@ -162,10 +172,9 @@ class PlaylistScheduler:
         self.start_time_var = tk.StringVar(value="00:00:00")
         ttk.Entry(time_frame, textvariable=self.start_time_var, width=10).grid(row=0, column=1, sticky=tk.W)
         ttk.Button(left_panel, text="⏰ Set Current Time", command=self.set_current_time).grid(row=6, column=0, pady=2, sticky=(tk.W, tk.E))
-
         ttk.Separator(left_panel, orient='horizontal').grid(row=7, column=0, sticky=(tk.W, tk.E), pady=5)
 
-        # Edit operations
+        # Edit ops
         ttk.Label(left_panel, text="✏️ Playlist Editing", font=('Arial', 9, 'bold')).grid(row=8, column=0, pady=(0, 5), sticky=tk.W)
         ttk.Button(left_panel, text="Move Up", command=self.move_up).grid(row=9, column=0, pady=1, sticky=(tk.W, tk.E))
         ttk.Button(left_panel, text="Move Down", command=self.move_down).grid(row=10, column=0, pady=1, sticky=(tk.W, tk.E))
@@ -229,7 +238,7 @@ class PlaylistScheduler:
         ttk.Separator(left_panel, orient='horizontal').grid(row=31, column=0, sticky=(tk.W, tk.E), pady=5)
         ttk.Button(left_panel, text="💾 Export Playlist", command=self.export_playlist).grid(row=32, column=0, pady=5, sticky=(tk.W, tk.E))
 
-        # Right: Timeline & status
+        # Right panel
         right_panel = ttk.LabelFrame(main_frame, text="🎬 Timeline & Live Status", padding="6")
         right_panel.grid(row=0, column=1, rowspan=2, sticky=(tk.W, tk.E, tk.N, tk.S))
         right_panel.columnconfigure(0, weight=1)
@@ -244,7 +253,7 @@ class PlaylistScheduler:
         self.time_label = ttk.Label(status_frame, text="", font=('Arial', 10, 'bold'))
         self.time_label.grid(row=0, column=2, padx=(5, 0), sticky=tk.E)
 
-        # Current file progress
+        # File progress
         self.file_time_label = ttk.Label(right_panel, text="", font=('Arial', 10))
         self.file_time_label.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(2, 6))
 
@@ -284,7 +293,7 @@ class PlaylistScheduler:
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         status_bar.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
 
-        # Start UI update loop
+        # Start loop
         self.update_ui_loop()
 
     # ---------- Time helpers ----------
@@ -321,17 +330,15 @@ class PlaylistScheduler:
 
     # ---------- UI loop ----------
     def update_ui_loop(self):
-        # Global elapsed (telecast)
-        if self.broadcasting:
-            # show time since schedule start based on wall-clock
+        # Global elapsed (telecast) based on wall‑clock
+        if self.broadcasting and self.abs_starts:
             now_sod = seconds_since_midnight()
-            sched_start = self.abs_starts[0] if self.abs_starts else 0
-            tele_elapsed = max(0, now_sod - sched_start)
+            tele_elapsed = max(0, now_sod - self.abs_starts[0])
             self.time_label.configure(text=f"Elapsed: {self.format_duration(tele_elapsed)}")
         else:
             self.time_label.configure(text="")
 
-        # Per-file progress using GetMediaInputStatus
+        # Per-file progress
         try:
             if self.obs_client:
                 input_name = None
@@ -343,12 +350,11 @@ class PlaylistScheduler:
                     input_name = self.scene_to_input.get("Fillers_Scene")
 
                 if input_name:
-                    st = self.obs_client.get_media_input_status(input_name)  # mediaState, mediaCursor, mediaDuration (ms)
+                    st = self.obs_client.get_media_input_status(input_name)
                     data = getattr(st, "responseData", None) or {}
                     cursor = int(data.get("mediaCursor", 0))
                     dur = int(data.get("mediaDuration", 0))
                     state = data.get("mediaState", "")
-                    # Convert ms -> s where appropriate
                     if dur >= 1000:
                         played_s = cursor / 1000
                         total_s = dur / 1000
@@ -439,7 +445,7 @@ class PlaylistScheduler:
                 safe_base = self._sanitize_name(base)
                 scene_name = f"Video_{i+1:03d}_{self._sanitize_name(base, 32)}"
 
-                # Unique input name using the file name
+                # Unique input name
                 input_name = safe_base
                 existing = set(self.scene_to_input.values())
                 suffix = 1
@@ -502,10 +508,7 @@ class PlaylistScheduler:
             resp = self.obs_client.get_scene_list()
             data = getattr(resp, "responseData", None) or {}
             raw_scenes = data.get("scenes", []) if isinstance(data, dict) else []
-            scenes = []
-            for s in raw_scenes:
-                if isinstance(s, dict) and "sceneName" in s:
-                    scenes.append(s["sceneName"])
+            scenes = [s["sceneName"] for s in raw_scenes if isinstance(s, dict) and "sceneName" in s]
 
             to_delete = []
             for name in scenes:
@@ -516,11 +519,7 @@ class PlaylistScheduler:
                     if len(parts) >= 2 and len(parts[1]) == 3 and parts[1].isdigit():
                         to_delete.append(name)
 
-            safe_scene = None
-            for name in scenes:
-                if name not in to_delete:
-                    safe_scene = name
-                    break
+            safe_scene = next((n for n in scenes if n not in to_delete), None)
 
             if not to_delete:
                 messagebox.showinfo("Remove Scenes", "No app-created scenes found.")
@@ -538,7 +537,7 @@ class PlaylistScheduler:
                 removed = 0
                 for name in to_delete:
                     try:
-                        self.obs_client.remove_scene(name)  # obsws-python v5 method
+                        self.obs_client.remove_scene(name)
                         removed += 1
                     except Exception as e:
                         print(f"Remove failed for {name}: {e}")
@@ -642,17 +641,14 @@ class PlaylistScheduler:
         self.skip_btn.configure(state='normal')
         self.remove_btn.configure(state='disabled')
 
-        # Immediately play whichever item is active by wall‑clock
-        try:
-            now_sod = seconds_since_midnight()
-            idx = self.index_for_time(now_sod)
-            if idx is not None:
-                self.switch_to_video(idx)
-                self.current_video_index = idx
-            else:
-                self.play_fillers_if_needed()
-        except Exception as e:
-            print(f"Immediate start error: {e}")
+        # Immediately align to wall‑clock
+        now_sod = seconds_since_midnight()
+        idx = self.index_for_time(now_sod)
+        if idx is not None:
+            self.switch_to_video(idx)
+            self.current_video_index = idx
+        else:
+            self.play_fillers_if_needed()
 
         self.live_status_label.configure(text="🔴 BROADCASTING LIVE", foreground=self.err)
         self.status_var.set("🔴 Live broadcast active")
@@ -663,12 +659,10 @@ class PlaylistScheduler:
             self.broadcast_thread.join(timeout=1)
 
         self.play_fillers_if_needed()
-
         self.start_btn.configure(state='normal')
         self.stop_btn.configure(state='disabled')
         self.skip_btn.configure(state='disabled')
         self.remove_btn.configure(state='normal')
-
         self.current_video_index = -1
         self.update_timeline()
         self.status_var.set("Broadcast stopped")
@@ -676,10 +670,8 @@ class PlaylistScheduler:
     def index_for_time(self, now_sod: int):
         if not self.videos:
             return None
-        # If before schedule start or after schedule end, return None
         if now_sod < self.abs_starts[0] or now_sod >= self.abs_ends[-1]:
             return None
-        # Find active segment
         for i, (s, e) in enumerate(zip(self.abs_starts, self.abs_ends)):
             if s <= now_sod < e:
                 return i
@@ -691,19 +683,17 @@ class PlaylistScheduler:
                 now_sod = seconds_since_midnight()
                 target_idx = self.index_for_time(now_sod)
 
-                # If the schedule says a clip should be on-air, ensure we are there
                 if target_idx is not None and target_idx != self.current_video_index:
                     self.switch_to_video(target_idx)
                     self.current_video_index = target_idx
 
-                # If schedule idle (before first or after last), go to fillers
                 if target_idx is None:
                     if not self.fillers_active:
                         self.play_fillers_if_needed()
                 else:
                     self.fillers_active = False
 
-                # Additional media-ended guard: if current ended early, hop to next
+                # Guard against media ending early
                 if target_idx is not None:
                     base = os.path.splitext(self.videos[target_idx]['filename'])[0]
                     scene_name = f"Video_{target_idx+1:03d}_{self._sanitize_name(base, 32)}"
@@ -716,11 +706,10 @@ class PlaylistScheduler:
                             cursor = int(data.get("mediaCursor", 0))
                             dur = int(data.get("mediaDuration", 0))
                             if state == "OBS_MEDIA_STATE_ENDED" or (dur and cursor >= dur):
-                                # switch immediately to next by wall-clock (if within schedule)
-                                next_idx = target_idx + 1 if (target_idx + 1) < len(self.videos) else None
-                                if next_idx is not None and now_sod < self.abs_ends[-1]:
-                                    self.switch_to_video(next_idx)
-                                    self.current_video_index = next_idx
+                                nxt = target_idx + 1 if (target_idx + 1) < len(self.videos) else None
+                                if nxt is not None and now_sod < self.abs_ends[-1]:
+                                    self.switch_to_video(nxt)
+                                    self.current_video_index = nxt
                         except Exception:
                             pass
 
@@ -730,7 +719,6 @@ class PlaylistScheduler:
                 time.sleep(1)
 
     def switch_to_video(self, video_index):
-        """Switch Program scene and explicitly restart its media input."""
         try:
             if 0 <= video_index < len(self.videos):
                 base = os.path.splitext(self.videos[video_index]['filename'])[0]
@@ -739,12 +727,10 @@ class PlaylistScheduler:
                 input_name = self.scene_to_input.get(scene_name)
                 if input_name:
                     self.obs_client.trigger_media_input_action(
-                        input_name,
-                        "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART"
+                        input_name, "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART"
                     )
                 filename = self.videos[video_index]['filename']
                 self.live_status_label.configure(text=f"🔴 NOW: {filename}", foreground=self.err)
-                # Update marker
                 for child in self.tree.get_children():
                     self.tree.set(child, 'status', '')
                 if 0 <= video_index < len(self.tree.get_children()):
@@ -773,7 +759,7 @@ class PlaylistScheduler:
         self.switch_to_video(index)
         self.current_video_index = index
 
-    # ---------- Editing helpers ----------
+    # ---------- Editing ----------
     def get_selected_indices(self):
         return [self.tree.index(item) for item in self.tree.selection()]
 
@@ -865,35 +851,6 @@ class PlaylistScheduler:
         except Exception as e:
             messagebox.showerror("Export Error", f"Could not write file:\n{e}")
 
-    # ---------- File/time UI ----------
-    def update_current_video_indicator(self, now_sod):
-        idx = self.index_for_time(now_sod) if self.broadcasting else None
-        for child in self.tree.get_children():
-            self.tree.set(child, 'status', '')
-        if idx is not None and 0 <= idx < len(self.tree.get_children()):
-            current_item = self.tree.get_children()[idx]
-            self.tree.set(current_item, 'status', '▶')
-
-    # ---------- Video IO ----------
-    def get_video_duration(self, filepath):
-        """Prefer ffprobe when bundled; otherwise fallback heuristic."""
-        try:
-            if getattr(sys, 'frozen', False):
-                ffprobe_path = os.path.join(sys._MEIPASS, 'ffprobe.exe')
-            else:
-                ffprobe_path = 'ffprobe'
-
-            cmd = [ffprobe_path, '-v', 'quiet', '-print_format', 'json', '-show_format', filepath]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                return float(data['format']['duration'])
-            else:
-                return max(os.path.getsize(filepath) / (1024 * 1024 * 2), 30)
-        except Exception:
-            return 60
-
     # ---------- Add files ----------
     def add_videos(self):
         filetypes = [("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.webm"), ("All files", "*.*")]
@@ -926,7 +883,7 @@ class PlaylistScheduler:
         else:
             self.videos.extend(new_videos)
 
-        self.update_timeline()  # recompute schedule + totals
+        self.update_timeline()
 
     # ---------- Timeline ----------
     def update_timeline(self):
@@ -946,10 +903,8 @@ class PlaylistScheduler:
         end_time_str = self.format_duration(self.abs_ends[-1]) if self.abs_ends else "00:00:00"
         self.status_var.set(f"Schedule: {self.start_time_var.get()} to {end_time_str} | Duration: {total_str} ({len(self.videos)} videos)")
 
-    # ---------- Misc ----------
+    # ---------- DnD handler ----------
     def on_drop(self, event):
-        if not HAS_DND:
-            return
         files = self.root.tk.splitlist(event.data)
         video_files = []
         for file in files:
@@ -959,6 +914,7 @@ class PlaylistScheduler:
         if video_files:
             self.process_files(video_files)
 
+    # ---------- Misc ----------
     def show_context_menu(self, event):
         try:
             self.context_menu.tk_popup(event.x_root, event.y_root)
@@ -973,10 +929,34 @@ class PlaylistScheduler:
             info = f"File: {video['filename']}\nPath: {video['filepath']}\nDuration: {self.format_duration(video['duration'])}"
             messagebox.showinfo("Video Info", info)
 
+    # ---------- Video IO ----------
+    def get_video_duration(self, filepath):
+        """Prefer ffprobe when bundled; otherwise fallback heuristic."""
+        try:
+            if getattr(sys, 'frozen', False):
+                ffprobe_path = os.path.join(sys._MEIPASS, 'ffprobe.exe')
+            else:
+                ffprobe_path = 'ffprobe'
+            cmd = [ffprobe_path, '-v', 'quiet', '-print_format', 'json', '-show_format', filepath]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                return float(data['format']['duration'])
+            else:
+                return max(os.path.getsize(filepath) / (1024 * 1024 * 2), 30)
+        except Exception:
+            return 60
+
 
 def main():
-    # Ensure a single Tk root to avoid stray blank windows
-    root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
+    # Single Tk root; if tkdnd unusable, fall back to plain Tk
+    if HAS_DND:
+        try:
+            root = TkinterDnD.Tk()  # type: ignore
+        except Exception:
+            root = tk.Tk()
+    else:
+        root = tk.Tk()
     app = PlaylistScheduler(root)
     root.update_idletasks()
     x = (root.winfo_screenwidth() // 2) - (root.winfo_width() // 2)
