@@ -37,9 +37,17 @@ def seconds_since_midnight() -> int:
 
 
 class PlaylistScheduler:
+    # Constants for the new single-scene player mode
+    PLAYER_SCENE = "Scheduler_Player"
+    PLAYER_INPUT = "Scheduler_Player_Input"
+    FILLERS_SCENE = "Fillers_Scene"
+    FILLERS_INPUT = "Fillers_Playlist"
+    # Legacy multi-scene prefix (still removable by the cleaner)
+    LEGACY_PREFIX = "Video_"
+
     def __init__(self, root):
         self.root = root
-        self.root.title("OBS Playlist Scheduler v1.5 - Live Broadcast Automation")
+        self.root.title("OBS Playlist Scheduler v2.0 - Live Broadcast Automation")
         self.root.geometry("1480x900")
 
         # Data
@@ -62,9 +70,6 @@ class PlaylistScheduler:
         self.obs_port_var = tk.StringVar(value="4455")
         self.obs_password_var = tk.StringVar(value="")
 
-        # Scene -> input name map
-        self.scene_to_input = {}
-
         # Theme colors
         self.bg = "#2d2d2d"
         self.fg = "#e6e6e6"
@@ -85,7 +90,7 @@ class PlaylistScheduler:
         return cleaned[:max_len]
 
     def recompute_schedule_times(self):
-        """Compute absolute start/end times for each item from Start Time."""
+        """Compute absolute start/end times for each item from Start Time (wall‑clock)."""
         start_seconds = self.time_to_seconds(self.start_time_var.get())
         self.abs_starts = []
         self.abs_ends = []
@@ -152,7 +157,7 @@ class PlaylistScheduler:
         left_scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
         left_container.rowconfigure(0, weight=1)
 
-        # Group: Control Center
+        # Control Center
         left_panel = ttk.LabelFrame(self.left_inner, text="Broadcast Control Center", padding="6")
         left_panel.grid(row=0, column=0, sticky=(tk.W, tk.E))
         left_panel.columnconfigure(0, weight=1)
@@ -207,9 +212,13 @@ class PlaylistScheduler:
         self.connect_btn.grid(row=18, column=0, pady=2, sticky=(tk.W, tk.E))
         self.connection_status = ttk.Label(left_panel, text="● Disconnected", foreground=self.err, font=('Arial', 8))
         self.connection_status.grid(row=19, column=0, sticky=tk.W)
-        self.setup_btn = ttk.Button(left_panel, text="🎬 Setup OBS Scenes", command=self.setup_obs_scenes)
-        self.setup_btn.grid(row=20, column=0, pady=2, sticky=(tk.W, tk.E))
-        self.setup_btn.configure(state='disabled')
+
+        # Player scene setup (single-scene mode)
+        self.setup_player_btn = ttk.Button(left_panel, text="🎬 Setup Player Scene", command=self.setup_player_scene)
+        self.setup_player_btn.grid(row=20, column=0, pady=2, sticky=(tk.W, tk.E))
+        self.setup_player_btn.configure(state='disabled')
+
+        # Remove app scenes
         self.remove_btn = ttk.Button(left_panel, text="🗑 Remove Your Scenes", command=self.remove_app_scenes)
         self.remove_btn.grid(row=21, column=0, pady=2, sticky=(tk.W, tk.E))
         self.remove_btn.configure(state='disabled')
@@ -293,7 +302,6 @@ class PlaylistScheduler:
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         status_bar.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
 
-        # Start loop
         self.update_ui_loop()
 
     # ---------- Time helpers ----------
@@ -330,7 +338,6 @@ class PlaylistScheduler:
 
     # ---------- UI loop ----------
     def update_ui_loop(self):
-        # Global elapsed (telecast) based on wall‑clock
         if self.broadcasting and self.abs_starts:
             now_sod = seconds_since_midnight()
             tele_elapsed = max(0, now_sod - self.abs_starts[0])
@@ -342,12 +349,10 @@ class PlaylistScheduler:
         try:
             if self.obs_client:
                 input_name = None
-                if 0 <= self.current_video_index < len(self.videos):
-                    base = os.path.splitext(self.videos[self.current_video_index]['filename'])[0]
-                    scene_name = f"Video_{self.current_video_index+1:03d}_{self._sanitize_name(base, 32)}"
-                    input_name = self.scene_to_input.get(scene_name)
+                if self.is_player_ready():
+                    input_name = self.PLAYER_INPUT
                 elif self.fillers_active:
-                    input_name = self.scene_to_input.get("Fillers_Scene")
+                    input_name = self.FILLERS_INPUT
 
                 if input_name:
                     st = self.obs_client.get_media_input_status(input_name)
@@ -394,7 +399,7 @@ class PlaylistScheduler:
 
             self.connection_status.configure(text="● Connected", foreground=self.ok)
             self.connect_btn.configure(text="Disconnect", command=self.disconnect_obs)
-            self.setup_btn.configure(state='normal')
+            self.setup_player_btn.configure(state='normal')
             self.remove_btn.configure(state='normal')
             if self.videos:
                 self.start_btn.configure(state='normal')
@@ -423,129 +428,88 @@ class PlaylistScheduler:
 
         self.connection_status.configure(text="● Disconnected", foreground=self.err)
         self.connect_btn.configure(text="Connect to OBS", command=self.connect_obs)
-        self.setup_btn.configure(state='disabled')
+        self.setup_player_btn.configure(state='disabled')
         self.remove_btn.configure(state='disabled')
         self.start_btn.configure(state='disabled')
         self.status_var.set("Disconnected from OBS")
 
-    # ---------- Scene setup / removal ----------
-    def setup_obs_scenes(self):
-        """Create scenes and attach media sources; input names mirror file names."""
-        if not self.obs_client or not self.videos:
-            messagebox.showwarning("Setup Error", "Connect to OBS and add videos first.")
-            return
-
-        try:
-            self.scene_to_input.clear()
-            success_count = 0
-            failed_count = 0
-
-            for i, video in enumerate(self.videos):
-                base = os.path.splitext(video['filename'])[0]
-                safe_base = self._sanitize_name(base)
-                scene_name = f"Video_{i+1:03d}_{self._sanitize_name(base, 32)}"
-
-                # Unique input name
-                input_name = safe_base
-                existing = set(self.scene_to_input.values())
-                suffix = 1
-                while input_name in existing:
-                    suffix += 1
-                    input_name = f"{safe_base}_{suffix}"
-
-                try:
-                    self.obs_client.create_scene(scene_name)
-                except Exception:
-                    pass
-
-                try:
-                    file_path = os.path.abspath(video['filepath']).replace("\\", "/")
-                    input_settings = {
-                        "local_file": file_path,
-                        "is_local_file": True,
-                        "looping": False,
-                        "restart_on_activate": True,
-                        "clear_on_media_end": False,
-                        "close_when_inactive": False,
-                        "hardware_decode": False
-                    }
-
-                    self.obs_client.create_input(
-                        scene_name,
-                        input_name,
-                        "ffmpeg_source",
-                        input_settings,
-                        True
-                    )
-                    self.scene_to_input[scene_name] = input_name
-                    success_count += 1
-                except Exception as e:
-                    print(f"Failed to create {scene_name}: {e}")
-                    failed_count += 1
-
-            if self.fillers:
-                self.ensure_fillers_scene()
-
-            if success_count > 0:
-                if self.obs_client:
-                    self.start_btn.configure(state='normal')
-                msg = f"🎉 SUCCESS!\n\n✅ {success_count} scenes created with sources!"
-                if failed_count > 0:
-                    msg += f"\n❌ {failed_count} scenes failed"
-                messagebox.showinfo("Setup Complete", msg)
-                self.status_var.set(f"Scenes: {success_count} working, {failed_count} failed")
-            else:
-                messagebox.showerror("Setup Failed", "❌ No working scenes created.\nCheck console for errors.")
-        except Exception as e:
-            messagebox.showerror("Setup Error", f"Critical error:\n{str(e)}")
-
-    def remove_app_scenes(self):
-        """Delete only scenes created by this app: prefix 'Video_###_' and 'Fillers_Scene'."""
+    # ---------- Player scene (single-scene mode) ----------
+    def setup_player_scene(self):
+        """Create/refresh one scene with one ffmpeg_source used for all items via SetInputSettings."""
         if not self.obs_client:
-            messagebox.showwarning("Remove Scenes", "Connect to OBS first.")
+            messagebox.showwarning("Setup Player", "Connect to OBS first.")
             return
         try:
-            resp = self.obs_client.get_scene_list()
-            data = getattr(resp, "responseData", None) or {}
-            raw_scenes = data.get("scenes", []) if isinstance(data, dict) else []
-            scenes = [s["sceneName"] for s in raw_scenes if isinstance(s, dict) and "sceneName" in s]
+            try:
+                self.obs_client.create_scene(self.PLAYER_SCENE)
+            except Exception:
+                pass
 
-            to_delete = []
-            for name in scenes:
-                if name == "Fillers_Scene":
-                    to_delete.append(name)
-                elif name.startswith("Video_"):
-                    parts = name.split("_", 2)
-                    if len(parts) >= 2 and len(parts[1]) == 3 and parts[1].isdigit():
-                        to_delete.append(name)
+            # If input exists, remove and recreate to normalize settings
+            try:
+                self.obs_client.remove_input(self.PLAYER_INPUT)
+            except Exception:
+                pass
 
-            safe_scene = next((n for n in scenes if n not in to_delete), None)
-
-            if not to_delete:
-                messagebox.showinfo("Remove Scenes", "No app-created scenes found.")
-                return
-            if not safe_scene:
-                messagebox.showwarning("Remove Scenes", "No safe scene to switch to before deletion; create one manually.")
-                return
-
-            if messagebox.askyesno("Confirm", f"Remove {len(to_delete)} scenes created by the app?"):
-                try:
-                    self.obs_client.set_current_program_scene(safe_scene)
-                except Exception:
-                    pass
-
-                removed = 0
-                for name in to_delete:
-                    try:
-                        self.obs_client.remove_scene(name)
-                        removed += 1
-                    except Exception as e:
-                        print(f"Remove failed for {name}: {e}")
-
-                self.status_var.set(f"Removed {removed} app scenes")
-                messagebox.showinfo("Remove Scenes", f"Removed {removed} scenes.")
+            input_settings = {
+                "local_file": "",  # set per item at runtime
+                "is_local_file": True,
+                "looping": False,
+                "restart_on_activate": True,
+                "clear_on_media_end": False,
+                "close_when_inactive": False,
+                "hardware_decode": False
+            }
+            self.obs_client.create_input(
+                self.PLAYER_SCENE,
+                self.PLAYER_INPUT,
+                "ffmpeg_source",
+                input_settings,
+                True
+            )
+            self.status_var.set("Player scene ready")
+            messagebox.showinfo("Player Scene", "Single-scene player created.\nUse Start Broadcasting to run the schedule.")
         except Exception as e:
-            messagebox.showerror("Remove Scenes", f"Error: {e}")
+            messagebox.showerror("Player Scene", f"Error creating player: {e}")
+
+    def is_player_ready(self):
+        """Heuristic: player is ready if the input exists; errors are swallowed."""
+        try:
+            self.obs_client.get_input_settings(self.PLAYER_INPUT)
+            return True
+        except Exception:
+            return False
+
+    def play_item_on_player(self, index: int):
+        """Switch Program to PLAYER_SCENE and set local_file to selected item, then restart."""
+        if not (0 <= index < len(self.videos)):
+            return
+        try:
+            if not self.is_player_ready():
+                self.setup_player_scene()
+            file_path = os.path.abspath(self.videos[index]['filepath']).replace("\\", "/")
+            # SetInputSettings with overlay=True updates only provided fields (v5)
+            self.obs_client.set_input_settings(
+                self.PLAYER_INPUT,
+                {"local_file": file_path, "is_local_file": True},
+                True
+            )
+            # Ensure scene is on-air
+            self.obs_client.set_current_program_scene(self.PLAYER_SCENE)
+            # Restart playback
+            self.obs_client.trigger_media_input_action(
+                self.PLAYER_INPUT, "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART"
+            )
+            # Update UI
+            filename = self.videos[index]['filename']
+            self.live_status_label.configure(text=f"🔴 NOW: {filename}", foreground=self.err)
+            for child in self.tree.get_children():
+                self.tree.set(child, 'status', '')
+            if 0 <= index < len(self.tree.get_children()):
+                curr = self.tree.get_children()[index]
+                self.tree.set(curr, 'status', '▶')
+        except Exception as e:
+            print(f"Player error: {e}")
 
     # ---------- Fillers ----------
     def add_fillers(self):
@@ -564,13 +528,15 @@ class PlaylistScheduler:
 
     def ensure_fillers_scene(self):
         """Create/refresh Fillers_Scene using VLC playlist if possible, else single loop."""
+        if not self.obs_client:
+            return
         try:
             try:
-                self.obs_client.create_scene("Fillers_Scene")
+                self.obs_client.create_scene(self.FILLERS_SCENE)
             except Exception:
                 pass
             try:
-                self.obs_client.remove_input("Fillers_Playlist")
+                self.obs_client.remove_input(self.FILLERS_INPUT)
             except Exception:
                 pass
 
@@ -578,7 +544,7 @@ class PlaylistScheduler:
                 playlist = [{"value": os.path.abspath(p).replace("\\", "/"), "hidden": False, "selected": True}
                             for p in self.fillers]
                 input_settings = {"playlist": playlist, "loop": True, "shuffle": False, "playback_behavior": "always_play"}
-                self.obs_client.create_input("Fillers_Scene", "Fillers_Playlist", "vlc_source", input_settings, True)
+                self.obs_client.create_input(self.FILLERS_SCENE, self.FILLERS_INPUT, "vlc_source", input_settings, True)
             else:
                 file_path = os.path.abspath(self.fillers[0]).replace("\\", "/")
                 input_settings = {
@@ -590,9 +556,8 @@ class PlaylistScheduler:
                     "close_when_inactive": False,
                     "hardware_decode": False
                 }
-                self.obs_client.create_input("Fillers_Scene", "Fillers_Playlist", "ffmpeg_source", input_settings, True)
+                self.obs_client.create_input(self.FILLERS_SCENE, self.FILLERS_INPUT, "ffmpeg_source", input_settings, True)
 
-            self.scene_to_input["Fillers_Scene"] = "Fillers_Playlist"
             self.status_var.set("Fillers_Scene ready")
         except Exception as e:
             messagebox.showerror("Fillers", f"Could not create fillers scene:\n{e}")
@@ -607,17 +572,15 @@ class PlaylistScheduler:
             return
         self.ensure_fillers_scene()
         try:
-            self.obs_client.set_current_program_scene("Fillers_Scene")
-            inp = self.scene_to_input.get("Fillers_Scene")
-            if inp:
-                self.obs_client.trigger_media_input_action(inp, "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART")
+            self.obs_client.set_current_program_scene(self.FILLERS_SCENE)
+            self.obs_client.trigger_media_input_action(self.FILLERS_INPUT, "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART")
             self.fillers_active = True
             self.live_status_label.configure(text="Fillers are playing", foreground=self.warn)
             self.file_time_label.configure(text="Fillers are playing")
         except Exception as e:
             print(f"Filler playback error: {e}")
 
-    # ---------- Broadcast control ----------
+    # ---------- Broadcast control (single-scene, wall‑clock) ----------
     def start_broadcast(self):
         if not self.obs_client:
             messagebox.showwarning("Broadcast Error", "Connect to OBS first.")
@@ -645,7 +608,7 @@ class PlaylistScheduler:
         now_sod = seconds_since_midnight()
         idx = self.index_for_time(now_sod)
         if idx is not None:
-            self.switch_to_video(idx)
+            self.play_item_on_player(idx)
             self.current_video_index = idx
         else:
             self.play_fillers_if_needed()
@@ -684,7 +647,7 @@ class PlaylistScheduler:
                 target_idx = self.index_for_time(now_sod)
 
                 if target_idx is not None and target_idx != self.current_video_index:
-                    self.switch_to_video(target_idx)
+                    self.play_item_on_player(target_idx)
                     self.current_video_index = target_idx
 
                 if target_idx is None:
@@ -693,58 +656,28 @@ class PlaylistScheduler:
                 else:
                     self.fillers_active = False
 
-                # Guard against media ending early
-                if target_idx is not None:
-                    base = os.path.splitext(self.videos[target_idx]['filename'])[0]
-                    scene_name = f"Video_{target_idx+1:03d}_{self._sanitize_name(base, 32)}"
-                    input_name = self.scene_to_input.get(scene_name)
-                    if input_name:
-                        try:
-                            st = self.obs_client.get_media_input_status(input_name)
-                            data = getattr(st, "responseData", None) or {}
-                            state = data.get("mediaState", "")
-                            cursor = int(data.get("mediaCursor", 0))
-                            dur = int(data.get("mediaDuration", 0))
-                            if state == "OBS_MEDIA_STATE_ENDED" or (dur and cursor >= dur):
-                                nxt = target_idx + 1 if (target_idx + 1) < len(self.videos) else None
-                                if nxt is not None and now_sod < self.abs_ends[-1]:
-                                    self.switch_to_video(nxt)
-                                    self.current_video_index = nxt
-                        except Exception:
-                            pass
+                # Media-ended guard (if item ends early, still hop to next by time)
+                if target_idx is not None and now_sod >= self.abs_ends[target_idx]:
+                    nxt = target_idx + 1
+                    if nxt < len(self.videos):
+                        self.play_item_on_player(nxt)
+                        self.current_video_index = nxt
+                    else:
+                        self.broadcasting = False
+                        self.play_fillers_if_needed()
+                        break
 
                 time.sleep(0.5)
             except Exception as e:
                 print(f"Broadcast controller error: {e}")
                 time.sleep(1)
 
-    def switch_to_video(self, video_index):
-        try:
-            if 0 <= video_index < len(self.videos):
-                base = os.path.splitext(self.videos[video_index]['filename'])[0]
-                scene_name = f"Video_{video_index+1:03d}_{self._sanitize_name(base, 32)}"
-                self.obs_client.set_current_program_scene(scene_name)
-                input_name = self.scene_to_input.get(scene_name)
-                if input_name:
-                    self.obs_client.trigger_media_input_action(
-                        input_name, "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART"
-                    )
-                filename = self.videos[video_index]['filename']
-                self.live_status_label.configure(text=f"🔴 NOW: {filename}", foreground=self.err)
-                for child in self.tree.get_children():
-                    self.tree.set(child, 'status', '')
-                if 0 <= video_index < len(self.tree.get_children()):
-                    curr = self.tree.get_children()[video_index]
-                    self.tree.set(curr, 'status', '▶')
-        except Exception as e:
-            print(f"Error switching/starting media: {e}")
-
     def skip_to_next(self):
         if not self.broadcasting:
             return
         next_idx = (self.current_video_index + 1) if self.current_video_index >= 0 else 0
         if next_idx < len(self.videos):
-            self.switch_to_video(next_idx)
+            self.play_item_on_player(next_idx)
             self.current_video_index = next_idx
         else:
             self.stop_broadcast()
@@ -756,8 +689,62 @@ class PlaylistScheduler:
         if not self.broadcasting:
             self.start_broadcast()
         index = self.tree.index(selection[0])
-        self.switch_to_video(index)
+        self.play_item_on_player(index)
         self.current_video_index = index
+
+    # ---------- Delete app scenes ----------
+    def remove_app_scenes(self):
+        """Delete Player, Fillers, and legacy Video_###_* scenes in one click (switching away first)."""
+        if not self.obs_client:
+            messagebox.showwarning("Remove Scenes", "Connect to OBS first.")
+            return
+        try:
+            resp = self.obs_client.get_scene_list()
+            data = getattr(resp, "responseData", None) or {}
+            raw_scenes = data.get("scenes", []) if isinstance(data, dict) else []
+            scenes = [s["sceneName"] for s in raw_scenes if isinstance(s, dict) and "sceneName" in s]
+
+            to_delete = []
+            for name in scenes:
+                if name in (self.PLAYER_SCENE, self.FILLERS_SCENE):
+                    to_delete.append(name)
+                elif name.startswith(self.LEGACY_PREFIX):
+                    parts = name.split("_", 2)
+                    if len(parts) >= 2 and len(parts[1]) == 3 and parts[1].isdigit():
+                        to_delete.append(name)
+
+            safe_scene = next((n for n in scenes if n not in to_delete), None)
+
+            if not to_delete:
+                messagebox.showinfo("Remove Scenes", "No app-created scenes found.")
+                return
+            if not safe_scene:
+                messagebox.showwarning("Remove Scenes", "No safe scene to switch to before deletion; create one manually.")
+                return
+
+            if messagebox.askyesno("Confirm", f"Remove {len(to_delete)} app scenes?"):
+                try:
+                    # Switch both Program and Preview away (Studio Mode safe)
+                    self.obs_client.set_current_program_scene(safe_scene)
+                    try:
+                        self.obs_client.set_current_preview_scene(safe_scene)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                removed = 0
+                for name in to_delete:
+                    try:
+                        self.obs_client.remove_scene(name)
+                        removed += 1
+                    except Exception as e:
+                        print(f"Remove failed for {name}: {e}")
+
+                self.status_var.set(f"Removed {removed} app scenes")
+                messagebox.showinfo("Remove Scenes", f"Removed {removed} scenes.")
+        except Exception as e:
+            messagebox.showerror("Remove Scenes", f"Error: {e}")
 
     # ---------- Editing ----------
     def get_selected_indices(self):
@@ -841,7 +828,7 @@ class PlaylistScheduler:
                 "start_time_abs": int(self.abs_starts[i]),
                 "start_formatted": self.format_duration(self.abs_starts[i]),
                 "end_formatted": self.format_duration(self.abs_ends[i]),
-                "scene_name": f"Video_{i+1:03d}_{self._sanitize_name(os.path.splitext(video['filename'])[0], 32)}"
+                "scene_name": self.PLAYER_SCENE
             })
 
         try:
