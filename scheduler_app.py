@@ -45,7 +45,7 @@ class PlaylistScheduler:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("OBS Playlist Scheduler v2.5 - Live Broadcast Automation")
+        self.root.title("OBS Playlist Scheduler v2.6 - Live Broadcast Automation")
         self.root.geometry("1480x900")
 
         # Data
@@ -674,6 +674,17 @@ class PlaylistScheduler:
             self.play_fillers_if_needed()
             self.current_video_index = -1
 
+    def jump_to_video(self):
+        """Context menu action: jump to the selected item immediately."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        index = self.tree.index(sel[0])
+        if not self.broadcasting:
+            self.start_broadcast()
+        self.play_item_on_player(index)
+        self.current_video_index = index
+
     # ---------- Remove app scenes ----------
     def remove_app_scenes(self):
         if not self.obs_client:
@@ -795,97 +806,6 @@ class PlaylistScheduler:
             messagebox.showinfo("Success", f"Schedule exported!\n\n{p}")
         except Exception as e:
             messagebox.showerror("Export Error", f"Could not write file:\n{e}")
-
-    # ---------- Add files ----------
-    def add_videos(self):
-        ft = [("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.webm"), ("All files", "*.*")]
-        files = filedialog.askopenfilenames(title="Select videos", filetypes=ft)
-        if files:
-            self.process_files(files)
-
-    def add_folder(self):
-        folder = filedialog.askdirectory(title="Select video folder")
-        if folder:
-            exts = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
-            files = [os.path.join(folder, f) for f in os.listdir(folder) if Path(f).suffix.lower() in exts]
-            if files:
-                files.sort()
-                self.process_files(files)
-
-    def process_files(self, files, insert_at=None):
-        self.status_var.set("Processing videos...")
-        self.root.update()
-        new = []
-        for fp in files:
-            fn = os.path.basename(fp)
-            dur = self.get_video_duration(fp)
-            new.append({'filepath': fp, 'filename': fn, 'duration': dur, 'absolute_time': None})
-        if insert_at is not None:
-            for i, v in enumerate(new):
-                self.videos.insert(insert_at + i, v)
-        else:
-            self.videos.extend(new)
-        self.update_timeline()
-
-    # ---------- Timeline ----------
-    def update_timeline(self):
-        self.recompute_schedule_times()
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-        for i, v in enumerate(self.videos):
-            st = self.format_time_or_auto(self.abs_starts[i], v.get('absolute_time') is not None)
-            et = self.format_duration(self.abs_ends[i])
-            dur = self.format_duration(v['duration'])
-            status = '▶' if i == self.current_video_index else ''
-            self.tree.insert('', 'end', values=(status, v['filename'], dur, st, et))
-        if self.abs_starts and self.abs_ends:
-            earliest = min(self.abs_starts)
-            latest = max(self.abs_ends)
-            span = self.format_duration(latest - earliest)
-            exact = sum(1 for v in self.videos if v.get('absolute_time') is not None)
-            auto = len(self.videos) - exact
-            self.status_var.set(f"Schedule: {self.format_duration(earliest)} to {self.format_duration(latest)} | Span: {span} | {exact} exact, {auto} auto | {len(self.fillers)} fillers")
-        else:
-            self.status_var.set("Schedule empty")
-
-    # ---------- DnD / Properties ----------
-    def on_drop(self, event):
-        files = self.root.tk.splitlist(event.data)
-        vids = []
-        for f in files:
-            p = f.strip('{}')
-            if os.path.isfile(p) and Path(p).suffix.lower() in {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}:
-                vids.append(p)
-        if vids:
-            self.process_files(vids)
-
-    def show_context_menu(self, event):
-        try:
-            self.context_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.context_menu.grab_release()
-
-    def show_properties(self):
-        sel = self.tree.selection()
-        if sel:
-            i = self.tree.index(sel[0])
-            v = self.videos[i]
-            exact = f"Exact: {self.format_duration(v['absolute_time'])}" if v.get('absolute_time') is not None else "Auto-scheduled"
-            info = f"File: {v['filename']}\nPath: {v['filepath']}\nDuration: {self.format_duration(v['duration'])}\n{exact}"
-            messagebox.showinfo("Video Info", info)
-
-    # ---------- Video IO ----------
-    def get_video_duration(self, fp):
-        try:
-            ff = 'ffprobe' if not getattr(sys, 'frozen', False) else os.path.join(sys._MEIPASS, 'ffprobe.exe')
-            r = subprocess.run([ff, '-v', 'quiet', '-print_format', 'json', '-show_format', fp], capture_output=True, text=True, timeout=10)
-            if r.returncode == 0:
-                d = json.loads(r.stdout)
-                return float(d['format']['duration'])
-            else:
-                return max(os.path.getsize(fp) / (1024 * 1024 * 2), 30)
-        except Exception:
-            return 60
 
 
 def main():
