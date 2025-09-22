@@ -45,10 +45,11 @@ class PlaylistScheduler:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("OBS Playlist Scheduler v2.2 - Live Broadcast Automation")
+        self.root.title("OBS Playlist Scheduler v2.3 - Live Broadcast Automation")
         self.root.geometry("1480x900")
 
-        self.videos = []              # {filepath, filename, duration, absolute_time}
+        # Data
+        self.videos = []              # dicts: filepath, filename, duration, absolute_time
         self.clipboard_data = []
         self.fillers = []
         self.broadcasting = False
@@ -57,18 +58,23 @@ class PlaylistScheduler:
         self.current_video_index = -1
         self.fillers_active = False
 
+        # Computed times
         self.abs_starts = []
         self.abs_ends = []
         self.total_duration = 0
 
+        # OBS connection
         self.obs_host_var = tk.StringVar(value="127.0.0.1")
         self.obs_port_var = tk.StringVar(value="4455")
         self.obs_password_var = tk.StringVar(value="")
 
+        # Theme
         self.bg = "#2d2d2d"; self.fg = "#e6e6e6"; self.acc = "#3b3b3b"; self.sel = "#4a4a4a"
         self.ok = "#66ff99"; self.warn = "#ffcc66"; self.err = "#ff6666"
 
-        self.setup_ui(); self.apply_dark_theme(); self.setup_drag_drop()
+        self.setup_ui()
+        self.apply_dark_theme()
+        self.setup_drag_drop()
 
     # ---------- Utilities ----------
     def _sanitize_name(self, name: str, max_len: int = 64) -> str:
@@ -76,7 +82,8 @@ class PlaylistScheduler:
         return "".join(ch if ch in allowed else "_" for ch in name)[:max_len]
 
     def recompute_schedule_times(self):
-        self.abs_starts = []; self.abs_ends = []
+        """Compute absolute start/end using explicit absolute_time first, then pack the rest sequentially after the last timed item or the default start time."""
+        self.abs_starts = []; self.abs_ends = []  # recompute cleanly
         if not self.videos:
             self.total_duration = 0; return
         timed = [(i, v) for i, v in enumerate(self.videos) if v.get('absolute_time') is not None]
@@ -85,7 +92,8 @@ class PlaylistScheduler:
         sched = {}
         for i, v in timed:
             s = v['absolute_time']; e = s + int(v['duration']); sched[i] = (s, e)
-        cur = max((e for (s, e) in sched.values()), default=self.time_to_seconds(self.start_time_var.get()))
+        base = self.time_to_seconds(self.start_time_var.get())
+        cur = max((e for (s, e) in sched.values()), default=base)
         for i, v in untimed:
             s = cur; e = s + int(v['duration']); sched[i] = (s, e); cur = e
         for i, v in enumerate(self.videos):
@@ -120,7 +128,7 @@ class PlaylistScheduler:
         self.root.columnconfigure(0, weight=1); self.root.rowconfigure(0, weight=1)
         main.columnconfigure(1, weight=1); main.rowconfigure(1, weight=1)
 
-        # Left scrollable panel
+        # Left scrollable column
         left_container = ttk.Frame(main); left_container.grid(row=0, column=0, rowspan=2, sticky="ns")
         self.left_canvas = tk.Canvas(left_container, width=380, highlightthickness=0, bg=self.bg)
         lscroll = ttk.Scrollbar(left_container, orient=tk.VERTICAL, command=self.left_canvas.yview)
@@ -129,7 +137,6 @@ class PlaylistScheduler:
         self.left_canvas.create_window((0, 0), window=self.left_inner, anchor="nw")
         self.left_canvas.configure(yscrollcommand=lscroll.set)
         self.left_canvas.grid(row=0, column=0, sticky="ns"); lscroll.grid(row=0, column=1, sticky="ns")
-        left_container.rowconfigure(0, weight=1)
 
         left = ttk.LabelFrame(self.left_inner, text="Broadcast Control Center", padding="6")
         left.grid(row=0, column=0, sticky="ew"); left.columnconfigure(0, weight=1)
@@ -151,7 +158,7 @@ class PlaylistScheduler:
         ttk.Button(left, text="🚫 Clear Start for Selected", command=self.clear_start_for_selected).grid(row=8, column=0, pady=1, sticky="ew")
         ttk.Separator(left).grid(row=9, column=0, sticky="ew", pady=5)
 
-        # Edit ops
+        # Editing
         ttk.Label(left, text="✏️ Playlist Editing", font=('Arial', 9, 'bold')).grid(row=10, column=0, pady=(0,5), sticky="w")
         ttk.Button(left, text="Move Up", command=self.move_up).grid(row=11, column=0, pady=1, sticky="ew")
         ttk.Button(left, text="Move Down", command=self.move_down).grid(row=12, column=0, pady=1, sticky="ew")
@@ -221,7 +228,7 @@ class PlaylistScheduler:
         scr = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scr.set); self.tree.grid(row=2, column=0, sticky="nsew"); scr.grid(row=2, column=1, sticky="ns")
 
-        # Context menu (properties moved to right-click; double-click now sets time)
+        # Context menu
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Jump to This Video", command=self.jump_to_video)
         self.context_menu.add_separator()
@@ -236,7 +243,8 @@ class PlaylistScheduler:
         self.context_menu.add_command(label="Delete", command=self.delete_selected)
 
         self.tree.bind("<Button-3>", self.show_context_menu)
-        self.tree.bind("<Double-1>", lambda e: self.set_start_for_selected())  # double‑click sets time
+        # Improvement: double‑click opens Set Start dialog
+        self.tree.bind("<Double-1>", lambda e: self.set_start_for_selected())
 
         self.status_var = tk.StringVar(value="Ready - Set start time and connect to OBS for automation")
         ttk.Label(main, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10,0))
@@ -249,8 +257,10 @@ class PlaylistScheduler:
         self.status_var.set(f"Default start time set to {self.start_time_var.get()}")
 
     def time_to_seconds(self, time_str):
-        try: h,m,s = map(int, time_str.split(':')); return h*3600+m*60+s
-        except Exception: return 0
+        try:
+            h, m, s = map(int, time_str.split(':')); return h*3600+m*60+s
+        except Exception:
+            return 0
 
     def format_duration(self, seconds):
         seconds = int(seconds); h=seconds//3600; m=(seconds%3600)//60; s=seconds%60; return f"{h:02d}:{m:02d}:{s:02d}"
@@ -258,26 +268,28 @@ class PlaylistScheduler:
     def format_time_or_auto(self, seconds, is_exact): 
         return f"★{self.format_duration(seconds)}" if is_exact else self.format_duration(seconds)
 
-    # ---------- Absolute time scheduling ----------
+    # ---------- Absolute scheduling ----------
     def set_start_for_selected(self):
         sel = self.get_selected_indices()
-        if not sel: messagebox.showwarning("Set Start Time","Select one or more videos first."); return
-        t = simpledialog.askstring("Set Start Time", f"Time for {len(sel)} item(s) HH:MM:SS", initialvalue="10:00:00")
+        if not sel:
+            messagebox.showwarning("Set Start Time","Select one or more videos first."); return
+        t = simpledialog.askstring("Set Start Time","Time (HH:MM:SS), e.g., 10:00:00", initialvalue="10:00:00")
         if not t: return
         try:
-            s = self.time_to_seconds(t); 
-            if s<0 or s>=86400: raise ValueError()
+            s = self.time_to_seconds(t)
+            if s < 0 or s >= 86400: raise ValueError()
         except Exception:
             messagebox.showerror("Invalid","Use HH:MM:SS in 24‑hour format."); return
         for i in sel:
-            if 0<=i<len(self.videos): self.videos[i]['absolute_time']=s
+            if 0<=i<len(self.videos): self.videos[i]['absolute_time'] = s
         self.update_timeline(); self.status_var.set(f"Exact start {t} set for {len(sel)} item(s)")
 
     def clear_start_for_selected(self):
         sel = self.get_selected_indices()
-        if not sel: messagebox.showwarning("Clear Start","Select one or more videos first."); return
+        if not sel:
+            messagebox.showwarning("Clear Start","Select one or more videos first."); return
         for i in sel:
-            if 0<=i<len(self.videos): self.videos[i]['absolute_time']=None
+            if 0<=i<len(self.videos): self.videos[i]['absolute_time'] = None
         self.update_timeline(); self.status_var.set(f"Cleared exact time for {len(sel)} item(s)")
 
     def context_set_start(self): self.set_start_for_selected()
@@ -289,14 +301,16 @@ class PlaylistScheduler:
             if HAS_DND:
                 self.tree.drop_target_register(DND_FILES); self.tree.dnd_bind('<<Drop>>', self.on_drop)
                 self.root.drop_target_register(DND_FILES); self.root.dnd_bind('<<Drop>>', self.on_drop)
-        except Exception: pass
+        except Exception:
+            pass
 
     # ---------- UI loop ----------
     def update_ui_loop(self):
         if self.broadcasting and self.abs_starts:
             now = seconds_since_midnight(); tele = max(0, now - min(self.abs_starts))
             self.time_label.configure(text=f"Elapsed: {self.format_duration(tele)}")
-        else: self.time_label.configure(text="")
+        else:
+            self.time_label.configure(text="")
 
         try:
             if self.obs_client:
@@ -304,15 +318,14 @@ class PlaylistScheduler:
                 if input_name:
                     st = self.obs_client.get_media_input_status(input_name)
                     data = getattr(st, "responseData", None) or {}
-                    cur = int(data.get("mediaCursor", 0)); dur = int(data.get("mediaDuration", 0))
-                    state = data.get("mediaState","")
-                    ps = cur/1000 if dur>=1000 else cur; ts = dur/1000 if dur>=1000 else dur
-                    rem = max(ts-ps,0)
+                    cur = int(data.get("mediaCursor", 0)); dur = int(data.get("mediaDuration", 0)); state = data.get("mediaState","")
+                    ps = cur/1000 if dur>=1000 else cur; ts = dur/1000 if dur>=1000 else dur; rem = max(ts-ps,0)
                     if self.fillers_active: self.file_time_label.configure(text="Fillers are playing (advertisements)")
                     else: self.file_time_label.configure(text=f"File: {self.format_duration(ps)} / {self.format_duration(ts)}  (−{self.format_duration(rem)}) [{state}]")
                 else:
                     self.file_time_label.configure(text="Fillers are playing (advertisements)" if self.fillers_active else "Nothing is playing")
-        except Exception: pass
+        except Exception:
+            pass
 
         self.root.after(1000, self.update_ui_loop)
 
@@ -335,7 +348,8 @@ class PlaylistScheduler:
             if self.videos: self.start_btn.configure(state='normal')
             self.status_var.set(f"Connected to OBS {v.obs_version} at {host}:{port}")
         except Exception as e:
-            messagebox.showerror("Connection Failed", f"Could not connect:\n\n{e}\n\nEnable OBS WebSocket and verify port/password."); self.disconnect_obs()
+            messagebox.showerror("Connection Failed", f"Could not connect:\n\n{e}\n\nEnable OBS WebSocket and verify port/password.")
+            self.disconnect_obs()
 
     def disconnect_obs(self):
         if self.broadcasting: self.stop_broadcast()
@@ -350,7 +364,8 @@ class PlaylistScheduler:
 
     # ---------- Player scene ----------
     def setup_player_scene(self):
-        if not self.obs_client: messagebox.showwarning("Setup Player","Connect to OBS first."); return
+        if not self.obs_client:
+            messagebox.showwarning("Setup Player","Connect to OBS first."); return
         try:
             try: self.obs_client.create_scene(self.PLAYER_SCENE)
             except Exception: pass
@@ -384,52 +399,47 @@ class PlaylistScheduler:
         except Exception as e:
             print(f"Player error: {e}")
 
-    # ---------- Fillers (robust, idempotent) ----------
+    # ---------- Fillers (idempotent: no CreateInput duplicate) ----------
     def ensure_fillers_scene(self):
-        """Create Fillers scene only if needed; reuse existing input if it already exists."""
         if not self.obs_client: return
         try:
-            # Ensure scene exists
-            try: self.obs_client.create_scene(self.FILLERS_SCENE)
+            try: self.obs_client.create_scene(self.FILLERS_SCENE)  # ok if exists [web:29]
             except Exception: pass
 
-            # Check if the fillers input already exists globally
+            # Query inputs; reuse if present
             try:
-                inputs_resp = self.obs_client.get_input_list()  # returns list of inputs [web:27]
-                data = getattr(inputs_resp, "responseData", None) or {}
+                li = self.obs_client.get_input_list()  # v5: GetInputList [web:27]
+                data = getattr(li, "responseData", None) or {}
                 existing = {i.get("inputName") for i in data.get("inputs", []) if isinstance(i, dict)}
             except Exception:
                 existing = set()
 
             if self.FILLERS_INPUT in existing:
-                # Update settings on the existing input instead of creating a new one
                 if len(self.fillers) > 1:
                     playlist = [{"value": os.path.abspath(p).replace("\\","/"), "hidden": False, "selected": True} for p in self.fillers]
-                    self.obs_client.set_input_settings(self.FILLERS_INPUT, {"playlist": playlist, "loop": True, "shuffle": False, "playback_behavior":"always_play"}, True)  # reuse input [web:29][web:52]
+                    self.obs_client.set_input_settings(self.FILLERS_INPUT, {"playlist": playlist, "loop": True, "shuffle": False, "playback_behavior":"always_play"}, True)  # reuse [web:29][web:52]
                 else:
-                    file_path = os.path.abspath(self.fillers[0]).replace("\\","/")
-                    self.obs_client.set_input_settings(self.FILLERS_INPUT, {"local_file": file_path, "is_local_file": True, "looping": True, "restart_on_activate": True}, True)  # reuse [web:123]
-                # Ensure the input is present as a scene item in Fillers_Scene
+                    fp = os.path.abspath(self.fillers[0]).replace("\\","/")
+                    self.obs_client.set_input_settings(self.FILLERS_INPUT, {"local_file": fp, "is_local_file": True, "looping": True, "restart_on_activate": True}, True)  # reuse [web:123]
+                # Ensure input is in the Fillers scene
                 try:
-                    items = self.obs_client.get_scene_item_list(self.FILLERS_SCENE)  # Scenes API [web:52]
-                    di = getattr(items, "responseData", None) or {}
+                    sl = self.obs_client.get_scene_item_list(self.FILLERS_SCENE)  # v5 [web:52]
+                    di = getattr(sl, "responseData", None) or {}
                     names = [it.get("sourceName") for it in di.get("sceneItems", []) if isinstance(it, dict)]
                     if self.FILLERS_INPUT not in names:
                         self.obs_client.create_scene_item(self.FILLERS_SCENE, self.FILLERS_INPUT)  # add existing input [web:52]
                 except Exception:
                     pass
             else:
-                # Create the input only once when missing
                 if len(self.fillers) > 1:
                     playlist = [{"value": os.path.abspath(p).replace("\\","/"), "hidden": False, "selected": True} for p in self.fillers]
                     self.obs_client.create_input(self.FILLERS_SCENE, self.FILLERS_INPUT, "vlc_source", {"playlist": playlist, "loop": True, "shuffle": False, "playback_behavior":"always_play"}, True)  # create [web:29]
                 else:
-                    file_path = os.path.abspath(self.fillers[0]).replace("\\","/")
-                    self.obs_client.create_input(self.FILLERS_SCENE, self.FILLERS_INPUT, "ffmpeg_source", {"local_file": file_path, "is_local_file": True, "looping": True, "restart_on_activate": True, "clear_on_media_end": False, "close_when_inactive": False, "hardware_decode": False}, True)  # create [web:29][web:123]
-
+                    fp = os.path.abspath(self.fillers[0]).replace("\\","/")
+                    self.obs_client.create_input(self.FILLERS_SCENE, self.FILLERS_INPUT, "ffmpeg_source", {"local_file": fp, "is_local_file": True, "looping": True, "restart_on_activate": True, "clear_on_media_end": False, "close_when_inactive": False, "hardware_decode": False}, True)  # create [web:29][web:123]
             self.status_var.set("Fillers ready")
         except Exception as e:
-            # Log to console; do not block with modal message during playout
+            # Log but don't block playout
             print(f"Fillers setup warning: {e}")
 
     def play_fillers_if_needed(self):
@@ -493,18 +503,19 @@ class PlaylistScheduler:
         if next_idx is not None: self.play_item_on_player(next_idx); self.current_video_index=next_idx
         else: self.play_fillers_if_needed(); self.current_video_index=-1
 
-    # ---------- Scene cleanup ----------
+    # ---------- Remove app scenes ----------
     def remove_app_scenes(self):
-        if not self.obs_client: messagebox.showwarning("Remove Scenes","Connect to OBS first."); return
+        if not self.obs_client:
+            messagebox.showwarning("Remove Scenes","Connect to OBS first."); return
         try:
-            resp = self.obs_client.get_scene_list(); data = getattr(resp,"responseData",None) or {}; raw = data.get("scenes",[]) if isinstance(data,dict) else []
-            scenes = [s.get("sceneName") for s in raw if isinstance(s,dict)]
+            sl = self.obs_client.get_scene_list(); data = getattr(sl,"responseData",None) or {}; raw = data.get("scenes", []) if isinstance(data, dict) else []
+            scenes = [s.get("sceneName") for s in raw if isinstance(s, dict)]
             to_del = [n for n in scenes if n in (self.PLAYER_SCENE, self.FILLERS_SCENE) or (n.startswith(self.LEGACY_PREFIX) and len(n.split("_",2)[1])==3 and n.split("_",2)[1].isdigit())]
             safe = next((n for n in scenes if n not in to_del), None)
             if not to_del: messagebox.showinfo("Remove Scenes","No app-created scenes found."); return
             if not safe: messagebox.showwarning("Remove Scenes","No safe scene to switch to; create one manually."); return
             if messagebox.askyesno("Confirm", f"Remove {len(to_del)} app scenes?"):
-                try: self.obs_client.set_current_program_scene(safe); 
+                try: self.obs_client.set_current_program_scene(safe)
                 except Exception: pass
                 try: self.obs_client.set_current_preview_scene(safe)
                 except Exception: pass
@@ -562,11 +573,12 @@ class PlaylistScheduler:
         self.recompute_schedule_times()
         sched = {"videos":[], "start_time": self.start_time_var.get(), "total_duration": self.total_duration, "fillers":[os.path.abspath(f) for f in self.fillers]}
         for i,v in enumerate(self.videos):
-            sched["videos"].append({"index":i,"filename":v["filename"],"filepath":os.path.abspath(v["filepath"]),"duration":float(v["duration"]), "absolute_time":v.get("absolute_time"), "start_time_abs":int(self.abs_starts[i]), "start_formatted": self.format_duration(self.abs_starts[i]), "end_formatted": self.format_duration(self.abs_ends[i]), "scene_name": self.PLAYER_SCENE, "is_exact_time": v.get("absolute_time") is not None})
-        try: 
+            sched["videos"].append({"index":i,"filename":v["filename"],"filepath":os.path.abspath(v["filepath"]), "duration":float(v["duration"]), "absolute_time":v.get("absolute_time"), "start_time_abs":int(self.abs_starts[i]), "start_formatted": self.format_duration(self.abs_starts[i]), "end_formatted": self.format_duration(self.abs_ends[i]), "scene_name": self.PLAYER_SCENE, "is_exact_time": v.get("absolute_time") is not None})
+        try:
             with open(p,"w",encoding="utf-8") as f: json.dump(sched,f,indent=2)
             messagebox.showinfo("Success", f"Schedule exported!\n\n{p}")
-        except Exception as e: messagebox.showerror("Export Error", f"Could not write file:\n{e}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Could not write file:\n{e}")
 
     # ---------- Add files ----------
     def add_videos(self):
@@ -632,8 +644,7 @@ class PlaylistScheduler:
     def get_video_duration(self, fp):
         try:
             ff='ffprobe' if not getattr(sys,'frozen',False) else os.path.join(sys._MEIPASS,'ffprobe.exe')
-            cmd=[ff,'-v','quiet','-print_format','json','-show_format',fp]
-            r=subprocess.run(cmd,capture_output=True,text=True,timeout=10)
+            r=subprocess.run([ff,'-v','quiet','-print_format','json','-show_format',fp],capture_output=True,text=True,timeout=10)
             if r.returncode==0:
                 d=json.loads(r.stdout); return float(d['format']['duration'])
             else: return max(os.path.getsize(fp)/(1024*1024*2),30)
