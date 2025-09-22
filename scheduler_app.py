@@ -660,7 +660,7 @@ class PlaylistScheduler:
             else: return max(os.path.getsize(fp)/(1024*1024*2),30)  [web:29]
         except Exception: return 60  [web:29]
 
-
+ 
 def main():
     if HAS_DND:
         try: root=TkinterDnD.Tk()  # type: ignore
