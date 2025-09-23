@@ -867,7 +867,7 @@ class PlaylistScheduler:
 def main():
     if HAS_DND:
         try:
-            root = TkinterDnD.Tk()  # type: ignore
+            root = TkinterDnD.Tk()  # type: ignore.
         except Exception:
             root = tk.Tk()
     else:
