@@ -27,15 +27,30 @@ except Exception:
     HAS_DND = False
 # ------------------------------
 import obsws_python as obs  # v5 client
+
 def seconds_since_midnight() -> int:
     now = datetime.now()
     return now.hour * 3600 + now.minute * 60 + now.second
+
+def get_media_duration(file_path):
+    """Get duration of media file using ffprobe."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT
+        )
+        return float(result.stdout)
+    except Exception:
+        return 0.0  # Default to 0 if error
+
 class PlaylistScheduler:
     PLAYER_SCENE = "Scheduler_Player"
     PLAYER_INPUT = "Scheduler_Player_Input"
     FILLERS_SCENE = "Fillers_Scene"
     FILLERS_INPUT = "Fillers_Playlist"
     LEGACY_PREFIX = "Video_"
+
     def __init__(self, root):
         self.root = root
         self.root.title("OBS Playlist Scheduler v2.6 - Live Broadcast Automation")
@@ -68,10 +83,12 @@ class PlaylistScheduler:
         self.setup_ui()
         self.apply_dark_theme()
         self.setup_drag_drop()
+
     # ---------- Utilities ----------
     def _sanitize_name(self, name: str, max_len: int = 64) -> str:
         allowed = "-_.() []{}abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         return "".join(ch if ch in allowed else "_" for ch in name)[:max_len]
+
     def recompute_schedule_times(self):
         """Compute absolute start/end using explicit absolute_time first, then pack the rest sequentially after the last timed item or the default start time."""
         self.abs_starts = []
@@ -99,6 +116,7 @@ class PlaylistScheduler:
             self.abs_starts.append(s)
             self.abs_ends.append(e)
         self.total_duration = (max(self.abs_ends) - min(self.abs_starts)) if self.abs_starts else 0
+
     # ---------- Theme ----------
     def apply_dark_theme(self):
         try:
@@ -122,6 +140,7 @@ class PlaylistScheduler:
             style.configure("TScrollbar", background=self.acc, troughcolor=self.bg)
         except Exception:
             pass
+
     # ---------- UI ----------
     def setup_ui(self):
         main = ttk.Frame(self.root, padding="10")
@@ -258,25 +277,30 @@ class PlaylistScheduler:
         self.status_var = tk.StringVar(value="Ready - Set start time and connect to OBS for automation")
         ttk.Label(main, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         self.update_ui_loop()
+
     # ---------- Time helpers ----------
     def set_current_time(self):
         self.start_time_var.set(datetime.now().strftime("%H:%M:%S"))
         self.update_timeline()
         self.status_var.set(f"Default start time set to {self.start_time_var.get()}")
+
     def time_to_seconds(self, time_str):
         try:
             h, m, s = map(int, time_str.split(':'))
             return h * 3600 + m * 60 + s
         except Exception:
             return 0
+
     def format_duration(self, seconds):
         seconds = int(seconds)
         h = seconds // 3600
         m = (seconds % 3600) // 60
         s = seconds % 60
         return f"{h:02d}:{m:02d}:{s:02d}"
+
     def format_time_or_auto(self, seconds, is_exact):
         return f"★{self.format_duration(seconds)}" if is_exact else self.format_duration(seconds)
+
     # ---------- Absolute scheduling ----------
     def set_start_for_selected(self):
         sel = self.get_selected_indices()
@@ -301,6 +325,7 @@ class PlaylistScheduler:
             return
         self.update_timeline()
         self.status_var.set(f"Exact start {t} set for {len(sel)} item(s), chained sequentially")
+
     def clear_start_for_selected(self):
         sel = self.get_selected_indices()
         if not sel:
@@ -311,10 +336,13 @@ class PlaylistScheduler:
                 self.videos[i]['absolute_time'] = None
         self.update_timeline()
         self.status_var.set(f"Cleared exact time for {len(sel)} item(s)")
+
     def context_set_start(self):
         self.set_start_for_selected()
+
     def context_clear_start(self):
         self.clear_start_for_selected()
+
     # ---------- DnD ----------
     def setup_drag_drop(self):
         try:
@@ -325,6 +353,61 @@ class PlaylistScheduler:
                 self.root.dnd_bind('<<Drop>>', self.on_drop)
         except Exception:
             pass
+
+    def on_drop(self, event):
+        files = self.root.tk.splitlist(event.data)
+        self.add_files(files)
+
+    # ---------- File Addition ----------
+    def add_files(self, files):
+        added = 0
+        for f in files:
+            if os.path.isfile(f):
+                duration = get_media_duration(f)
+                if duration > 0:
+                    self.videos.append({
+                        "filepath": f,
+                        "filename": os.path.basename(f),
+                        "duration": duration,
+                        "absolute_time": None
+                    })
+                    added += 1
+        if added > 0:
+            self.update_timeline()
+            self.status_var.set(f"Added {added} video(s)")
+            if self.obs_client:
+                self.start_btn.configure(state='normal')
+
+    def add_videos(self):
+        files = filedialog.askopenfilenames(
+            title="Select Video Files",
+            filetypes=[("Media", "*.mp4 *.mov *.mkv *.avi *.mp3 *.wav *.flac *.webm"), ("All files", "*.*")]
+        )
+        if files:
+            self.add_files(files)
+
+    def add_folder(self):
+        folder = filedialog.askdirectory(title="Select Folder")
+        if folder:
+            files = [os.path.join(folder, f) for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f))]
+            self.add_files(files)
+
+    # ---------- Timeline Update ----------
+    def update_timeline(self):
+        self.recompute_schedule_times()
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for i, v in enumerate(self.videos):
+            status = '▶' if i == self.current_video_index else ''
+            dur = self.format_duration(v['duration'])
+            start = self.format_time_or_auto(self.abs_starts[i], v.get('absolute_time') is not None)
+            end = self.format_duration(self.abs_ends[i])
+            self.tree.insert('', tk.END, values=(status, v['filename'], dur, start, end))
+        if self.videos and self.obs_client:
+            self.start_btn.configure(state='normal')
+        else:
+            self.start_btn.configure(state='disabled')
+
     # ---------- UI loop ----------
     def update_ui_loop(self):
         if self.broadcasting and self.abs_starts:
@@ -354,6 +437,22 @@ class PlaylistScheduler:
         except Exception:
             pass
         self.root.after(1000, self.update_ui_loop)
+
+    # ---------- Context Menu ----------
+    def show_context_menu(self, event):
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
+
+    def show_properties(self):
+        sel = self.tree.selection()
+        if sel:
+            index = self.tree.index(sel[0])
+            v = self.videos[index]
+            msg = f"Filename: {v['filename']}\nPath: {v['filepath']}\nDuration: {self.format_duration(v['duration'])}\nAbsolute Time: {v.get('absolute_time')}"
+            messagebox.showinfo("Properties", msg)
+
     # ---------- OBS connection ----------
     def connect_obs(self):
         try:
@@ -380,6 +479,7 @@ class PlaylistScheduler:
         except Exception as e:
             messagebox.showerror("Connection Failed", f"Could not connect:\n\n{e}\n\nEnable OBS WebSocket and verify port/password.")
             self.disconnect_obs()
+
     def disconnect_obs(self):
         if self.broadcasting:
             self.stop_broadcast()
@@ -395,6 +495,7 @@ class PlaylistScheduler:
         self.remove_btn.configure(state='disabled')
         self.start_btn.configure(state='disabled')
         self.status_var.set("Disconnected from OBS")
+
     # ---------- Player scene ----------
     def setup_player_scene(self):
         if not self.obs_client:
@@ -428,12 +529,14 @@ class PlaylistScheduler:
             messagebox.showinfo("Player Scene", "Player created. Use Start Broadcasting.")
         except Exception as e:
             messagebox.showerror("Player Scene", f"Error creating player:\n{e}")
+
     def is_player_ready(self):
         try:
             self.obs_client.get_input_settings(self.PLAYER_INPUT)
             return True
         except Exception:
             return False
+
     def play_item_on_player(self, idx: int):
         if not (0 <= idx < len(self.videos)):
             return
@@ -452,6 +555,7 @@ class PlaylistScheduler:
                 self.tree.set(self.tree.get_children()[idx], 'status', '▶')
         except Exception as e:
             print(f"Player error: {e}")
+
     # ---------- Fillers ----------
     def add_fillers(self):
         files = filedialog.askopenfilenames(
@@ -464,9 +568,11 @@ class PlaylistScheduler:
         self.status_var.set(f"Fillers set: {len(self.fillers)} item(s)")
         if self.obs_client:
             self.ensure_fillers_scene()
+
     def clear_fillers(self):
         self.fillers = []
         self.status_var.set("Fillers cleared")
+
     def ensure_fillers_scene(self):
         if not self.obs_client:
             return
@@ -516,6 +622,7 @@ class PlaylistScheduler:
             self.status_var.set("Fillers ready")
         except Exception as e:
             print(f"Fillers setup warning: {e}")
+
     def play_fillers_if_needed(self):
         if not self.obs_client:
             return
@@ -533,6 +640,7 @@ class PlaylistScheduler:
             self.file_time_label.configure(text="Fillers are playing (advertisements)")
         except Exception as e:
             print(f"Filler playback error: {e}")
+
     # ---------- Broadcast control ----------
     def start_broadcast(self):
         if not self.obs_client:
@@ -561,6 +669,7 @@ class PlaylistScheduler:
             self.play_fillers_if_needed()
         self.live_status_label.configure(text="🔴 BROADCASTING LIVE", foreground=self.err)
         self.status_var.set("🔴 Live broadcast active")
+
     def stop_broadcast(self):
         self.broadcasting = False
         if self.broadcast_thread:
@@ -573,6 +682,7 @@ class PlaylistScheduler:
         self.current_video_index = -1
         self.update_timeline()
         self.status_var.set("Broadcast stopped")
+
     def index_for_time(self, now_sod: int):
         if not self.videos or not self.abs_starts:
             return None
@@ -580,6 +690,7 @@ class PlaylistScheduler:
             if s <= now_sod < e:
                 return i
         return None
+
     def broadcast_controller(self):
         while self.broadcasting:
             try:
@@ -596,6 +707,7 @@ class PlaylistScheduler:
             except Exception as e:
                 print(f"Broadcast controller error: {e}")
                 time.sleep(1)
+
     def skip_to_next(self):
         if not self.broadcasting:
             return
@@ -611,6 +723,7 @@ class PlaylistScheduler:
         else:
             self.play_fillers_if_needed()
             self.current_video_index = -1
+
     def jump_to_video(self):
         """Context menu action: jump to the selected item immediately."""
         sel = self.tree.selection()
@@ -621,6 +734,7 @@ class PlaylistScheduler:
             self.start_broadcast()
         self.play_item_on_player(index)
         self.current_video_index = index
+
     # ---------- Remove app scenes ----------
     def remove_app_scenes(self):
         if not self.obs_client:
@@ -666,9 +780,11 @@ class PlaylistScheduler:
                 messagebox.showinfo("Remove Scenes", f"Removed {removed} scenes.")
         except Exception as e:
             messagebox.showerror("Remove Scenes", f"Error: {e}")
+
     # ---------- Editing ----------
     def get_selected_indices(self):
         return [self.tree.index(i) for i in self.tree.selection()]
+
     def move_up(self):
         idx = self.get_selected_indices()
         if not idx or idx[0] == 0:
@@ -676,6 +792,7 @@ class PlaylistScheduler:
         for i in idx:
             self.videos[i - 1], self.videos[i] = self.videos[i], self.videos[i - 1]
         self.update_timeline()
+
     def move_down(self):
         idx = self.get_selected_indices()
         if not idx or idx[-1] == len(self.videos) - 1:
@@ -683,6 +800,7 @@ class PlaylistScheduler:
         for i in reversed(idx):
             self.videos[i + 1], self.videos[i] = self.videos[i], self.videos[i + 1]
         self.update_timeline()
+
     def delete_selected(self):
         idx = self.get_selected_indices()
         if not idx:
@@ -691,18 +809,21 @@ class PlaylistScheduler:
             for i in reversed(idx):
                 del self.videos[i]
             self.update_timeline()
+
     def clear_all(self):
         if self.videos and messagebox.askyesno("Clear All", "Clear entire playlist?"):
             self.videos.clear()
             self.update_timeline()
             if self.obs_client and self.fillers:
                 self.play_fillers_if_needed()
+
     def copy_block(self):
         idx = self.get_selected_indices()
         if not idx:
             return
         self.clipboard_data = [self.videos[i].copy() for i in idx]
         self.status_var.set(f"Copied {len(idx)} item(s)")
+
     def paste_block(self):
         if not self.clipboard_data:
             return
@@ -712,6 +833,7 @@ class PlaylistScheduler:
             self.videos.insert(ins + j, v.copy())
         self.update_timeline()
         self.status_var.set(f"Pasted {len(self.clipboard_data)} item(s) at position {ins + 1}")
+
     # ---------- Export ----------
     def export_playlist(self):
         if not self.videos:
@@ -741,6 +863,7 @@ class PlaylistScheduler:
             messagebox.showinfo("Success", f"Schedule exported!\n\n{p}")
         except Exception as e:
             messagebox.showerror("Export Error", f"Could not write file:\n{e}")
+
 def main():
     if HAS_DND:
         try:
@@ -755,5 +878,6 @@ def main():
     y = (root.winfo_screenheight() // 2) - (root.winfo_height() // 2)
     root.geometry(f"+{x}+{y}")
     root.mainloop()
+
 if __name__ == "__main__":
     main()
